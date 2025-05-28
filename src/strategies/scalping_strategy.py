@@ -24,13 +24,20 @@ class ScalpingStrategy:
             sma_long  = calculate_sma(closes, self.cfg["sma_long"])
             price = closes[-1]
 
+            if sma_short is None or sma_long is None:
+                self.logger.warning(f"[SCALP] SMA calculation failed for {symbol}")
+                return
+
             if sma_short > sma_long and not self.tracker.has_position(symbol):
                 self.logger.info(f"[SCALP] Entry {symbol} @ {price}")
                 await self.executor.enter_long(symbol, price)
 
-            elif sma_short < sma_long and self.tracker.has_long(symbol):
-                self.logger.info(f"[SCALP] Exit {symbol} @ {price}")
-                await self.executor.exit_position(symbol, price)
+            elif sma_short < sma_long:
+                if hasattr(self.tracker, "has_long") and self.tracker.has_long(symbol):
+                    self.logger.info(f"[SCALP] Exit {symbol} @ {price}")
+                    await self.executor.exit_position(symbol, price)
+                else:
+                    self.logger.debug(f"[SCALP] No long position to exit for {symbol}")
 
         except Exception as e:
             self.logger.error(f"[SCALP] Error on {symbol}: {e}")
