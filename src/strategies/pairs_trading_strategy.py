@@ -8,18 +8,26 @@ class PairsTradingStrategy:
         self.executor = executor
         self.cfg = cfg
 
-    async def check_and_trade(self, _):
-        pairs = self.cfg["cross_ex_pairs"]
-        for sym_a, sym_b in pairs:
-            ohlcv_a = await self.api.get_ohlcv(sym_a, self.cfg["timeframe"], self.cfg["lookback"] + 1)
-            ohlcv_b = await self.api.get_ohlcv(sym_b, self.cfg["timeframe"], self.cfg["lookback"] + 1)
-            z = calculate_spread_zscore(ohlcv_a, ohlcv_b)
+        self.zscore_entry = cfg.get("zscore_entry", 1.5)
+        self.zscore_exit = cfg.get("zscore_exit", 0.5)
 
-            if z > self.cfg["zscore_entry"]:
-                logging.info(f"[PAIRS] Short {sym_a}/Long {sym_b} z={z:.2f}")
-                await self.executor.enter_short(sym_a)
-                await self.executor.enter_long(sym_b)
-            elif z < -self.cfg["zscore_entry"]:
-                logging.info(f"[PAIRS] Long {sym_a}/Short {sym_b} z={z:.2f}")
-                await self.executor.enter_long(sym_a)
-                await self.executor.enter_short(sym_b)
+        self.logger = logging.getLogger("PairsTrading")
+
+    async def check_and_trade(self, _):
+        pairs = self.cfg.get("cross_ex_pairs", [])
+        for sym_a, sym_b in pairs:
+            try:
+                ohlcv_a = await self.api.get_ohlcv(sym_a, self.cfg["timeframe"], self.cfg["lookback"] + 1)
+                ohlcv_b = await self.api.get_ohlcv(sym_b, self.cfg["timeframe"], self.cfg["lookback"] + 1)
+                z = calculate_spread_zscore(ohlcv_a, ohlcv_b)
+
+                if z > self.zscore_entry:
+                    self.logger.info(f"[PAIRS] Short {sym_a}/Long {sym_b} z={z:.2f}")
+                    await self.executor.enter_short(sym_a)
+                    await self.executor.enter_long(sym_b)
+                elif z < -self.zscore_entry:
+                    self.logger.info(f"[PAIRS] Long {sym_a}/Short {sym_b} z={z:.2f}")
+                    await self.executor.enter_long(sym_a)
+                    await self.executor.enter_short(sym_b)
+            except Exception as e:
+                self.logger.error(f"[PAIRS] Error on pair {sym_a}/{sym_b}: {e}")
