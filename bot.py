@@ -9,7 +9,6 @@ import pandas as pd
 from aiohttp import web
 
 from src.api_handler import ApiHandler
-from src.market_data_fix import start_fix_md_session
 from src.position_tracker import PositionTracker
 from src.trade_executor import TradeExecutor
 from src.strategy_manager import StrategyManager
@@ -35,7 +34,6 @@ def validate_config(cfg):
         "dynamic_universe": bool,
         "max_consecutive_losses": int,
         "pause_seconds_on_break": int,
-        # remove metrics_port here
     }
     for k, t in required.items():
         if k not in cfg or not isinstance(cfg[k], t):
@@ -74,16 +72,10 @@ async def main():
     setup_logging(cfg["log_file"])
     logging.info("🚀 HFT bot starting…")
 
-    # FIX Market Data
-    md_queue = queue.Queue() if cfg.get("use_fix_md") else None
-    if md_queue:
-        fix_cfg_path = os.path.join(repo_root, "fix_md.cfg")
-        start_fix_md_session(fix_cfg_path, md_queue)
-
     # Initialize core components
     api = ApiHandler(os.getenv("API_KEY"), os.getenv("API_SECRET"), cfg)
     tracker = PositionTracker(cfg)
-    executor = TradeExecutor(api, tracker, cfg, md_queue)
+    executor = TradeExecutor(api, tracker, cfg, md_queue=None)
     manager = StrategyManager(api, tracker, executor, cfg)
     vrf = VolatilityRegimeFilter(api, cfg)
 
