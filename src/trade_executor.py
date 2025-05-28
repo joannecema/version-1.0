@@ -2,6 +2,7 @@ import asyncio
 import logging
 import ccxt.pro as ccxtpro
 import queue
+import os
 
 class TradeExecutor:
     def __init__(self, api, tracker, cfg, md_queue=None):
@@ -9,7 +10,14 @@ class TradeExecutor:
         self.tracker = tracker
         self.cfg = cfg
         self.md_queue = md_queue
-        self.binance = ccxtpro.binance({"enableRateLimit": True})
+
+        # Detect US deployment
+        self.US_DEPLOYMENT = os.getenv("DEPLOY_REGION", "").lower() == "us"
+
+        # Only initialize Binance if not US-based
+        self.binance = None
+        if not self.US_DEPLOYMENT:
+            self.binance = ccxtpro.binance({"enableRateLimit": True})
 
     async def route_order(self, symbol, side, amount):
         p_b, p_a = None, None
@@ -30,21 +38,28 @@ class TradeExecutor:
                 logging.error(f"[ROUTER] Failed to get Phemex ticker for {symbol}: {e}")
                 return None
 
-        try:
-            b_tick = await self.binance.watch_ticker(symbol)
-            bin_b, bin_a = b_tick.get("bid"), b_tick.get("ask")
-        except Exception as e:
-            logging.error(f"[ROUTER] Failed to get Binance ticker for {symbol}: {e}")
-            return None
-
-        if None in (p_b, p_a, bin_b, bin_a):
-            logging.warning(f"[ROUTER] Incomplete ticker data for {symbol}")
-            return None
+        bin_b = bin_a = None
+        if self.binance:
+            try:
+                b_tick = await self.binance.watch_ticker(symbol)
+                bin_b, bin_a = b_tick.get("bid"), b_tick.get("ask")
+            except Exception as e:
+                logging.warning(f"[ROUTER] Binance ticker fallback failed for {symbol}: {e}")
 
         if side == "buy":
-            best, venue = min((p_a, "phemex"), (bin_a, "binance"))
+            if bin_a is not None and not self.US_DEPLOYMENT:
+                best, venue = min((p_a, "phemex"), (bin_a, "binance"))
+            else:
+                best, venue = p_a, "phemex"
         else:
-            best, venue = max((p_b, "phemex"), (bin_b, "binance"))
+            if bin_b is not None and not self.US_DEPLOYMENT:
+                best, venue = max((p_b, "phemex"), (bin_b, "binance"))
+            else:
+                best, venue = p_b, "phemex"
+
+        if best is None:
+            logging.error(f"[ROUTER] No valid price found for {symbol}")
+            return None
 
         logging.info(f"[ROUTER] {side.upper()} {symbol}@{best:.4f} via {venue}")
         try:
@@ -93,7 +108,9 @@ class TradeExecutor:
         try:
             if exchange_name == "phemex":
                 await self.api.exchange.create_order(symbol, "market", side, amount)
-            else:
+            elif exchange_name == "binance" and self.binance:
                 await self.binance.create_order(symbol, "market", side, amount)
+            else:
+                logging.warning(f"[EXEC] Market order skipped — exchange '{exchange_name}' unavailable.")
         except Exception as e:
             logging.error(f"[EXEC] Market order failed on {exchange_name} for {symbol}: {e}")
