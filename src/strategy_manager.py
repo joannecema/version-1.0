@@ -1,0 +1,42 @@
+import asyncio
+from src.strategies.scalping_strategy import ScalpingStrategy
+from src.strategies.pairs_trading_strategy import PairsTradingStrategy
+from src.strategies.market_making_strategy import MarketMakingStrategy
+from src.strategies.cross_exchange_arbitrage_strategy import CrossExchangeArbitrageStrategy
+
+class StrategyManager:
+    def __init__(self, api, tracker, executor, cfg):
+        self.api, self.tracker, self.exec, self.cfg = api, tracker, executor, cfg
+        self.strategies = [
+            ScalpingStrategy(api, tracker, executor, cfg),
+            PairsTradingStrategy(api, tracker, executor, cfg),
+            MarketMakingStrategy(api, tracker, executor, cfg),
+            CrossExchangeArbitrageStrategy(api, tracker, executor, cfg)
+        ]
+        self.sem = asyncio.Semaphore(10)
+
+    async def _run_strat(self, strat, sym=None):
+        async with self.sem:
+            await strat.check_and_trade(sym)
+
+    async def run_cycle(self):
+        # cross-exchange first
+        await self._run_strat(self.strategies[3], None)
+
+        # universe via fetch_tickers
+        tickers = await self.api.fetch_tickers()
+        scores = []
+        for sym,t in tickers.items():
+            if not sym.endswith("/USDT"): continue
+            spread = t["ask"]-t["bid"]
+            scores.append((sym, t["quoteVolume"]/(spread+1e-8)))
+        top = [s for s,_ in sorted(scores, key=lambda x: x[1], reverse=True)[:self.cfg["symbols_count"]]]
+
+        tasks = []
+        for strat in self.strategies[:3]:
+            if strat.__class__.__name__ == "PairsTradingStrategy":
+                tasks.append(self._run_strat(strat, None))
+            else:
+                for s in top:
+                    tasks.append(self._run_strat(strat, s))
+        await asyncio.gather(*tasks)
