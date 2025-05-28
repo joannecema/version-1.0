@@ -24,7 +24,7 @@ class ApiHandler:
             "secret": api_secret,
             "enableRateLimit": True,
         })
-        # markets will be loaded asynchronously in bot.py before use
+        # markets loaded in bot.py
 
     @retry
     async def watch_ohlcv(self, symbol, timeframe, limit):
@@ -36,13 +36,11 @@ class ApiHandler:
 
     async def get_ohlcv(self, symbol, timeframe, limit):
         """
-        Try WS first, then fall back to REST if it errors.
-        Returns a list of [timestamp, open, high, low, close, volume].
+        Unified OHLCV fetch: WS first, then REST.
         """
         try:
             return await self.watch_ohlcv(symbol, timeframe, limit)
         except Exception:
-            # WS failed—fallback to REST
             await asyncio.sleep(0.1)
             return await self.fetch_ohlcv(symbol, timeframe, None, limit)
 
