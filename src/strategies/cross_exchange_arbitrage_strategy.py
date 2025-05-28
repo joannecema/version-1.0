@@ -1,20 +1,44 @@
-import logging, ccxt.pro as ccxtpro
+import logging
+import ccxt.pro as ccxtpro
+
+log = logging.getLogger("CrossExchangeArbitrage")
 
 class CrossExchangeArbitrageStrategy:
     def __init__(self, api, tracker, executor, cfg):
-        self.phemex = api.exchange
-        self.binance = ccxtpro.binance({"enableRateLimit": True})
-        self.tracker, self.exec, self.cfg = tracker, executor, cfg
-        self.pairs = cfg["cross_ex_pairs"]
-        self.thresh = cfg["arb_threshold_pct"]
+        self.phemex    = api.exchange
+        self.binance   = ccxtpro.binance({"enableRateLimit": True})
+        self.tracker   = tracker
+        self.exec      = executor
+        self.cfg       = cfg
+        self.pairs     = cfg.get("cross_ex_pairs", [])
+        self.thresh    = cfg.get("arb_threshold_pct", 0)
 
     async def check_and_trade(self, _):
         for symbol, _ in self.pairs:
-            p_tick = await self.phemex.watch_ticker(symbol)
-            b_tick = await self.binance.watch_ticker(symbol)
-            spread = p_tick["bid"] - b_tick["ask"]
-            if spread/b_tick["ask"]>self.thresh:
-                qty=(self.tracker.equity*self.cfg["risk_pct"])/b_tick["ask"]
-                await self.exec.market_cross_order("binance",symbol,"buy",qty)
-                await self.exec.market_cross_order("phemex", symbol,"sell",qty)
-                logging.info(f"[ARB] Executed {symbol} qty={qty:.6f}")
+            try:
+                # fetch both sides
+                p_tick = await self.phemex.watch_ticker(symbol)
+                b_tick = await self.binance.watch_ticker(symbol)
+            except Exception as e:
+                log.error(f"[ARB] ticker fetch failed for {symbol}: {e}")
+                continue
+
+            # ensure bids/asks present
+            p_bid = p_tick.get("bid")
+            b_ask = b_tick.get("ask")
+            if p_bid is None or b_ask is None or b_ask <= 0:
+                log.warning(f"[ARB] invalid tick data for {symbol}: p_bid={p_bid}, b_ask={b_ask}")
+                continue
+
+            spread_pct = (p_bid - b_ask) / b_ask
+            log.debug(f"[ARB] {symbol} spread_pct={spread_pct:.5f}")
+
+            if spread_pct > self.thresh:
+                # size by risk %
+                try:
+                    qty = (self.tracker.equity * self.cfg["risk_pct"]) / b_ask
+                    await self.exec.market_cross_order("binance", symbol, "buy",  qty)
+                    await self.exec.market_cross_order("phemex",  symbol, "sell", qty)
+                    log.info(f"[ARB] Executed {symbol} qty={qty:.6f} spread={spread_pct:.4f}")
+                except Exception as e:
+                    log.error(f"[ARB] order execution failed for {symbol}: {e}")
