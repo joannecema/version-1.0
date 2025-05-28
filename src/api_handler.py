@@ -31,6 +31,7 @@ class ApiHandler:
         self.cfg = cfg
         self.disable_ws = cfg.get("disable_ws", False)
         self.binance_enabled = True
+        self.throttle = asyncio.Semaphore(cfg.get("max_concurrent_requests", 3))  # Throttling limit
 
         self.exchange = ccxtpro.phemex({
             "apiKey": api_key,
@@ -64,7 +65,8 @@ class ApiHandler:
 
     @retry
     async def fetch_ohlcv(self, symbol, timeframe, since=None, limit=None, params=None):
-        return await self.exchange.fetch_ohlcv(symbol, timeframe, since, limit, params or {})
+        async with self.throttle:
+            return await self.exchange.fetch_ohlcv(symbol, timeframe, since, limit, params or {})
 
     async def get_ohlcv(self, symbol, timeframe, limit):
         try:
@@ -91,7 +93,8 @@ class ApiHandler:
 
     @retry
     async def fetch_ticker(self, symbol: str):
-        return await self.exchange.fetch_ticker(symbol)
+        async with self.throttle:
+            return await self.exchange.fetch_ticker(symbol)
 
     async def get_ticker(self, symbol: str):
         try:
@@ -122,7 +125,8 @@ class ApiHandler:
         if self.disable_ws:
             logger.warning(f"[API] WebSocket is disabled — falling back to REST for {symbol}")
             try:
-                return await self.exchange.fetch_order_book(symbol, limit=limit)
+                async with self.throttle:
+                    return await self.exchange.fetch_order_book(symbol, limit=limit)
             except Exception as e:
                 logger.error(f"[API] REST fetch_order_book failed for {symbol}: {e}")
                 return None
@@ -132,34 +136,37 @@ class ApiHandler:
             except Exception as e:
                 logger.warning(f"[API] WebSocket order book failed for {symbol}, fallback to REST: {e}")
                 try:
-                    return await self.exchange.fetch_order_book(symbol, limit=limit)
+                    async with self.throttle:
+                        return await self.exchange.fetch_order_book(symbol, limit=limit)
                 except Exception as e2:
                     logger.error(f"[API] REST fallback also failed for {symbol}: {e2}")
                     return None
 
     async def create_limit_order(self, symbol, side, amount, price, params):
         try:
-            market = self.exchange.market(symbol)
-            precision_amount = market['precision']['amount']
-            precision_price = market['precision']['price']
-            formatted_amount = float(f"{amount:.{precision_amount}f}")
-            formatted_price = float(f"{price:.{precision_price}f}")
-            logger.debug(f"[API] Payload → {side.upper()} {symbol} qty={formatted_amount} price={formatted_price} TIF={params}")
-            order = await self.exchange.create_order(symbol, "limit", side, formatted_amount, formatted_price, params)
-            logger.info(f"[API] Order placed → ID={order.get('id')} STATUS={order.get('status')}")
-            logger.debug(f"[API] Raw response: {order}")
-            return order
+            async with self.throttle:
+                market = self.exchange.market(symbol)
+                precision_amount = market['precision']['amount']
+                precision_price = market['precision']['price']
+                formatted_amount = float(f"{amount:.{precision_amount}f}")
+                formatted_price = float(f"{price:.{precision_price}f}")
+                logger.debug(f"[API] Payload → {side.upper()} {symbol} qty={formatted_amount} price={formatted_price} TIF={params}")
+                order = await self.exchange.create_order(symbol, "limit", side, formatted_amount, formatted_price, params)
+                logger.info(f"[API] Order placed → ID={order.get('id')} STATUS={order.get('status')}")
+                logger.debug(f"[API] Raw response: {order}")
+                return order
         except Exception as e:
             logger.error(f"[API] Failed to place limit order for {symbol}: {e}")
             return None
 
     async def create_market_order(self, symbol, side, amount):
         try:
-            market = self.exchange.market(symbol)
-            precision_amount = market['precision']['amount']
-            formatted_amount = float(f"{amount:.{precision_amount}f}")
-            logger.debug(f"[API] Market order → {side.upper()} {symbol} qty={formatted_amount}")
-            return await self.exchange.create_order(symbol, "market", side, formatted_amount)
+            async with self.throttle:
+                market = self.exchange.market(symbol)
+                precision_amount = market['precision']['amount']
+                formatted_amount = float(f"{amount:.{precision_amount}f}")
+                logger.debug(f"[API] Market order → {side.upper()} {symbol} qty={formatted_amount}")
+                return await self.exchange.create_order(symbol, "market", side, formatted_amount)
         except Exception as e:
             logger.error(f"[API] Failed to place market order for {symbol}: {e}")
             return None
