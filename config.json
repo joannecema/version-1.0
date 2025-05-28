@@ -18,12 +18,18 @@
   "health_port": 8000,
   "metrics_port": 8001,
   "dynamic_universe": true,
-  "pairs": [["BTC/USDT","ETH/USDT"],["SOL/USDT","ADA/USDT"]],
+  "pairs": [
+    ["BTC/USDT","ETH/USDT"],
+    ["SOL/USDT","ADA/USDT"]
+  ],
   "market_make_spread_pct": 0.0002,
   "market_make_size_usdt": 5,
-  "cross_ex_pairs": [["BTC/USDT","ETH/USDT"]],
+  "cross_ex_pairs": [
+    ["BTC/USDT","ETH/USDT"]
+  ],
   "arb_threshold_pct": 0.0015,
   "volatility_threshold_atr": 0.002,
+  "threshold": 0.002,              // added for the VRF code
   "max_consecutive_losses": 5,
   "pause_seconds_on_break": 300,
   "leverage": 1.5,
