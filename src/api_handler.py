@@ -24,11 +24,12 @@ def retry(fn):
         raise last_exc
     return wrapped
 
+
 class ApiHandler:
     def __init__(self, api_key, api_secret, cfg):
         self.cfg = cfg
         self.disable_ws = cfg.get("disable_ws", False)
-        self.binance_enabled = False if cfg.get("disable_binance", True) else True
+        self.binance_enabled = not cfg.get("disable_binance", True)
         self.throttle = asyncio.Semaphore(cfg.get("max_concurrent_requests", 3))
 
         self.exchange = ccxtpro.phemex({
@@ -37,13 +38,21 @@ class ApiHandler:
             "enableRateLimit": True,
         })
 
-        if cfg.get("enable_binance"):
-            try:
-                temp_binance = ccxtpro.binance()
-                asyncio.create_task(self._check_binance_block(temp_binance))
-            except Exception as e:
-                logger.warning(f"[BINANCE] Could not initialize test client: {e}")
-                self.binance_enabled = False
+        self.market_map = {}  # Normalized: 'BTC/USDT' → market['id']
+
+    async def load_markets(self):
+        try:
+            await self.exchange.load_markets()
+            self.market_map = {
+                symbol: market["id"] for symbol, market in self.exchange.markets.items()
+            }
+            logger.info(f"[API] Markets loaded: {len(self.market_map)} symbols mapped")
+        except Exception as e:
+            logger.error(f"[API] Failed to load markets: {e}")
+            raise
+
+    def get_market_id(self, symbol: str) -> str:
+        return self.market_map.get(symbol) or self.exchange.market(symbol)["id"]
 
     async def _check_binance_block(self, client):
         try:
@@ -59,16 +68,20 @@ class ApiHandler:
     async def watch_ohlcv(self, symbol, timeframe, limit):
         if self.disable_ws:
             raise RuntimeError("WebSocket is disabled by config.")
-        return await self.exchange.watch_ohlcv(symbol, timeframe, limit)
+        market_id = self.get_market_id(symbol)
+        return await self.exchange.watch_ohlcv(market_id, timeframe, limit)
 
     @retry
     async def fetch_ohlcv(self, symbol, timeframe, since=None, limit=None, params=None):
         async with self.throttle:
-            # Inject required "to" param for Phemex
-            to = int(time.time() * 1000)
-            final_params = params.copy() if params else {}
-            final_params["to"] = to
-            return await self.exchange.fetch_ohlcv(symbol, timeframe, since, limit, final_params)
+            try:
+                market_id = self.get_market_id(symbol)
+                final_params = params.copy() if params else {}
+                final_params["to"] = int(time.time() * 1000)
+                return await self.exchange.fetch_ohlcv(market_id, timeframe, since, limit, final_params)
+            except Exception as e:
+                logger.error(f"[API] fetch_ohlcv failed for {symbol}: {e}")
+                return []
 
     async def get_ohlcv(self, symbol, timeframe, limit):
         try:
@@ -80,23 +93,20 @@ class ApiHandler:
         to_ts = int(time.time() * 1000)
         seconds = self.exchange.parse_timeframe(timeframe)
         from_ts = to_ts - limit * seconds * 1000
-        try:
-            return await self.fetch_ohlcv(symbol, timeframe, since=from_ts, limit=limit,
-                                          params={"to": to_ts})
-        except Exception as e2:
-            logger.error(f"[API] fetch_ohlcv failed for {symbol}: {e2}")
-            return []
+        return await self.fetch_ohlcv(symbol, timeframe, since=from_ts, limit=limit)
 
     @retry
     async def watch_ticker(self, symbol):
         if self.disable_ws:
             raise RuntimeError("WebSocket is disabled by config.")
-        return await self.exchange.watch_ticker(symbol)
+        market_id = self.get_market_id(symbol)
+        return await self.exchange.watch_ticker(market_id)
 
     @retry
     async def fetch_ticker(self, symbol: str):
         async with self.throttle:
-            return await self.exchange.fetch_ticker(symbol)
+            market_id = self.get_market_id(symbol)
+            return await self.exchange.fetch_ticker(market_id)
 
     async def get_ticker(self, symbol: str):
         try:
@@ -124,22 +134,23 @@ class ApiHandler:
 
     @retry
     async def fetch_order_book(self, symbol, limit=5):
+        market_id = self.get_market_id(symbol)
         if self.disable_ws:
             logger.warning(f"[API] WebSocket is disabled — falling back to REST for {symbol}")
             try:
                 async with self.throttle:
-                    return await self.exchange.fetch_order_book(symbol, limit=limit)
+                    return await self.exchange.fetch_order_book(market_id, limit=limit)
             except Exception as e:
                 logger.error(f"[API] REST fetch_order_book failed for {symbol}: {e}")
                 return None
         else:
             try:
-                return await self.exchange.watch_order_book(symbol, limit)
+                return await self.exchange.watch_order_book(market_id, limit)
             except Exception as e:
                 logger.warning(f"[API] WebSocket order book failed for {symbol}, fallback to REST: {e}")
                 try:
                     async with self.throttle:
-                        return await self.exchange.fetch_order_book(symbol, limit=limit)
+                        return await self.exchange.fetch_order_book(market_id, limit=limit)
                 except Exception as e2:
                     logger.error(f"[API] REST fallback also failed for {symbol}: {e2}")
                     return None
@@ -188,9 +199,7 @@ class ApiHandler:
     async def fetch_open_orders(self, symbol=None):
         try:
             async with self.throttle:
-                orders = await self.exchange.fetch_open_orders(symbol) if symbol else await self.exchange.fetch_open_orders()
-                logger.debug(f"[ORDERS] Retrieved {len(orders)} open orders for {symbol or 'ALL'}")
-                return orders
+                return await self.exchange.fetch_open_orders(symbol) if symbol else await self.exchange.fetch_open_orders()
         except Exception as e:
             logger.error(f"[API] Failed to fetch open orders for {symbol or 'ALL'}: {e}")
             return []
