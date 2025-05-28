@@ -24,7 +24,7 @@ class ApiHandler:
             "secret": api_secret,
             "enableRateLimit": True,
         })
-        # markets loaded in bot.py
+        # markets will be loaded asynchronously in bot.py before use
 
     @retry
     async def watch_ohlcv(self, symbol, timeframe, limit):
@@ -41,15 +41,10 @@ class ApiHandler:
         """
         try:
             return await self.watch_ohlcv(symbol, timeframe, limit)
-        except Exception as ws_err:
+        except Exception:
             # WS failed—fallback to REST
             await asyncio.sleep(0.1)
-            try:
-                # since=None -> most recent; ccxt uses limit positional
-                return await self.fetch_ohlcv(symbol, timeframe, None, limit)
-            except Exception as rest_err:
-                # bubble up the REST error
-                raise RuntimeError(f"get_ohlcv REST failed: {rest_err}") from rest_err
+            return await self.fetch_ohlcv(symbol, timeframe, None, limit)
 
     @retry
     async def watch_ticker(self, symbol):
