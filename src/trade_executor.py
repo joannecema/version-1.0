@@ -36,6 +36,19 @@ class TradeExecutor:
             except Exception:
                 pass
 
+    def sanitize_order_params(self, params):
+        clean = {}
+        for k, v in (params or {}).items():
+            try:
+                if isinstance(v, str) or isinstance(v, float):
+                    clean[k] = int(float(v))
+                else:
+                    clean[k] = v
+            except Exception as e:
+                logging.warning(f"[SANITIZE] Could not cast param {k}={v}: {e}")
+                clean[k] = v
+        return clean
+
     async def route_order(self, symbol, side, amount):
         p_b, p_a = None, None
 
@@ -72,15 +85,13 @@ class TradeExecutor:
                 self.binance_enabled = False
 
         if side == "buy":
+            best, venue = (p_a, "phemex")
             if bin_a is not None and self.binance_enabled:
                 best, venue = min((p_a, "phemex"), (bin_a, "binance"))
-            else:
-                best, venue = p_a, "phemex"
         else:
+            best, venue = (p_b, "phemex")
             if bin_b is not None and self.binance_enabled:
                 best, venue = max((p_b, "phemex"), (bin_b, "binance"))
-            else:
-                best, venue = p_b, "phemex"
 
         if best is None:
             logging.error(f"[ROUTER] No valid price found for {symbol}")
@@ -93,13 +104,15 @@ class TradeExecutor:
         logging.debug(f"[PAYLOAD] symbol_id={symbol_id}, side={side}, amount={amount}, price={price}, timeInForce=IOC")
 
         try:
+            params = self.sanitize_order_params({"timeInForce": "IOC"})
+
             if venue == "phemex":
                 result = await self.api.exchange.create_order(
-                    symbol_id, "limit", side, amount, price, {"timeInForce": "IOC"}
+                    symbol_id, "limit", side, amount, price, params
                 )
             elif venue == "binance" and self.binance_enabled:
                 result = await self.binance.create_order(
-                    symbol, "limit", side, amount, price, {"timeInForce": "IOC"}
+                    symbol, "limit", side, amount, price, params
                 )
             else:
                 result = None
