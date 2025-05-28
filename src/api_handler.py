@@ -64,7 +64,11 @@ class ApiHandler:
     @retry
     async def fetch_ohlcv(self, symbol, timeframe, since=None, limit=None, params=None):
         async with self.throttle:
-            return await self.exchange.fetch_ohlcv(symbol, timeframe, since, limit, params or {})
+            # Inject required "to" param for Phemex
+            to = int(time.time() * 1000)
+            final_params = params.copy() if params else {}
+            final_params["to"] = to
+            return await self.exchange.fetch_ohlcv(symbol, timeframe, since, limit, final_params)
 
     async def get_ohlcv(self, symbol, timeframe, limit):
         try:
@@ -78,7 +82,7 @@ class ApiHandler:
         from_ts = to_ts - limit * seconds * 1000
         try:
             return await self.fetch_ohlcv(symbol, timeframe, since=from_ts, limit=limit,
-                                          params={"start": from_ts, "end": to_ts})
+                                          params={"to": to_ts})
         except Exception as e2:
             logger.error(f"[API] fetch_ohlcv failed for {symbol}: {e2}")
             return []
