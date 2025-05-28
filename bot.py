@@ -3,7 +3,6 @@ import json
 import asyncio
 import logging
 import signal
-
 import pandas as pd
 from aiohttp import web
 
@@ -37,7 +36,7 @@ def validate_config(cfg):
         "report_interval_cycles": int,
         "log_file": str,
         "trade_history_file": str,
-        "volatility_threshold_atr": float,        # <— new
+        "volatility_threshold_atr": float,
     }
     for k, t in required.items():
         if k not in cfg or not isinstance(cfg[k], t):
@@ -47,8 +46,7 @@ def validate_config(cfg):
 def setup_logging(log_file):
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
-    fmt = logging.Formatter("[%(asctime)s] %(levelname)s %(message)s",
-                            "%Y-%m-%d %H:%M:%S")
+    fmt = logging.Formatter("[%(asctime)s] %(levelname)s %(message)s", "%Y-%m-%d %H:%M:%S")
     ch = logging.StreamHandler(); ch.setFormatter(fmt)
     fh = logging.FileHandler(log_file); fh.setFormatter(fmt)
     logger.addHandler(ch); logger.addHandler(fh)
@@ -59,8 +57,8 @@ async def health(request):
 
 
 async def shutdown(api):
-    logging.info("Shutdown signal received—cleaning up")
-    await api.exchange.close()
+    logging.info("Shutdown signal received — cleaning up")
+    await api.close()
     asyncio.get_event_loop().stop()
 
 
@@ -73,39 +71,32 @@ async def start_http(app, cfg):
 
 async def main():
     repo_root = os.path.dirname(os.path.abspath(__file__))
-
-    # load config with JSON error reporting
     try:
         with open(os.path.join(repo_root, "config.json"), "r") as f:
             cfg = json.load(f)
     except json.JSONDecodeError as e:
         raise RuntimeError(f"Could not parse config.json: {e}")
 
-    # validate
     validate_config(cfg)
-
-    # copy your volatility_threshold_atr into the key VRF expects
     cfg["threshold"] = cfg["volatility_threshold_atr"]
-
-    # logging
     setup_logging(cfg["log_file"])
     logging.info("🚀 HFT bot starting…")
 
-    # init
-    api      = ApiHandler(os.getenv("API_KEY"), os.getenv("API_SECRET"), cfg)
+    api = ApiHandler(os.getenv("API_KEY"), os.getenv("API_SECRET"), cfg)
     await api.exchange.load_markets()
-    tracker  = PositionTracker(cfg)
-    executor = TradeExecutor(api, tracker, cfg, md_queue=None)
-    manager  = StrategyManager(api, tracker, executor, cfg)
-    vrf      = VolatilityRegimeFilter(api, cfg)
 
-    # health endpoint
+    # ✅ Fixed constructor for PositionTracker with both cfg and api
+    tracker = PositionTracker(cfg, api)
+
+    executor = TradeExecutor(api, tracker, cfg, md_queue=None)
+    manager = StrategyManager(api, tracker, executor, cfg)
+    vrf = VolatilityRegimeFilter(api, cfg)
+
     app = web.Application()
     app["tracker"] = tracker
     app.router.add_get('/health', health)
     asyncio.create_task(start_http(app, cfg))
 
-    # shutdown
     loop = asyncio.get_event_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, lambda: asyncio.create_task(shutdown(api)))
@@ -113,7 +104,6 @@ async def main():
     consecutive_losses = 0
     cycle = 0
 
-    # loop
     while True:
         if consecutive_losses >= cfg["max_consecutive_losses"]:
             logging.warning("Circuit breaker – pausing")
@@ -129,16 +119,15 @@ async def main():
         cycle += 1
 
         if cycle % cfg["report_interval_cycles"] == 0:
-            df   = pd.DataFrame(tracker.trade_history)
+            df = pd.DataFrame(tracker.trade_history)
             wins = len(df[df["pnl"] > 0])
-            tot  = len(df)
+            tot = len(df)
             logging.info(
                 f"Equity: ${tracker.equity:.2f} | "
-                f"ROI: {(tracker.equity/900-1)*100:.1f}% | "
+                f"ROI: {(tracker.equity/900 - 1) * 100:.1f}% | "
                 f"Trades: {tot} | Wins: {wins}"
             )
 
-        # track consecutive losses
         if tracker.trade_history and tracker.trade_history[-1]["pnl"] < 0:
             consecutive_losses += 1
         else:
