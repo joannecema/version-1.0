@@ -31,4 +31,10 @@ class VolatilityRegimeFilter:
         vol = sum(returns) / len(returns)
         log.info(f"[VRF] {symbol} volatility={vol:.4f}")
 
-        return vol < self.cfg["threshold"]
+        # use explicit 'threshold' if present, otherwise fall back to volatility_threshold_atr
+        threshold = self.cfg.get("threshold", self.cfg.get("volatility_threshold_atr"))
+        if threshold is None:
+            log.error("[VRF] No volatility threshold configured (neither 'threshold' nor 'volatility_threshold_atr')")
+            return False
+
+        return vol < threshold
