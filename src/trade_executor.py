@@ -89,18 +89,30 @@ class TradeExecutor:
         logging.info(f"[ROUTER] {side.upper()} {symbol}@{best:.4f} via {venue}")
         try:
             if venue == "phemex":
-                return await self.api.create_limit_order(symbol, side, amount, best, {"timeInForce": "IOC"})
+                result = await self.api.create_limit_order(symbol, side, amount, best, {"timeInForce": "IOC"})
             elif venue == "binance" and self.binance_enabled:
-                return await self.binance.create_order(symbol, "limit", side, amount, best, {"timeInForce": "IOC"})
+                result = await self.binance.create_order(symbol, "limit", side, amount, best, {"timeInForce": "IOC"})
+            else:
+                result = None
+
+            if result:
+                logging.debug(f"[ROUTER] Order result: {result}")
+            else:
+                logging.error(f"[ROUTER] No result returned for {symbol} order on {venue}")
+            return result
+
         except Exception as e:
             logging.error(f"[ROUTER] Order placement failed for {symbol} on {venue}: {e}")
-        return None
+            return None
 
     async def enter(self, symbol, side, amount, tp, sl):
         logging.info(f"[EXEC] ENTRY {side.upper()} {symbol} qty={amount:.6f}")
         result = await self.route_order(symbol, side, amount)
         if result:
+            logging.info(f"[EXEC] Entry order placed for {symbol}: {result}")
             self.tracker.record_entry(symbol, side, amount, tp, tp, sl)
+        else:
+            logging.error(f"[EXEC] Entry order failed for {symbol}")
 
     async def exit(self, symbol, exit_price=None):
         try:
@@ -127,15 +139,20 @@ class TradeExecutor:
         logging.info(f"[EXEC] EXIT {side.upper()} {symbol} @ {price:.2f}")
         result = await self.route_order(symbol, side, pos["amount"])
         if result:
+            logging.info(f"[EXEC] Exit order placed for {symbol}: {result}")
             self.tracker.record_exit(symbol, price)
+        else:
+            logging.error(f"[EXEC] Exit order failed for {symbol}")
 
     async def market_cross_order(self, exchange_name, symbol, side, amount):
         try:
             if exchange_name == "phemex":
-                await self.api.exchange.create_order(symbol, "market", side, amount)
+                result = await self.api.exchange.create_order(symbol, "market", side, amount)
             elif exchange_name == "binance" and self.binance_enabled:
-                await self.binance.create_order(symbol, "market", side, amount)
+                result = await self.binance.create_order(symbol, "market", side, amount)
             else:
                 logging.warning(f"[EXEC] Market order skipped — exchange '{exchange_name}' unavailable.")
+                return
+            logging.debug(f"[EXEC] Market order result on {exchange_name}: {result}")
         except Exception as e:
             logging.error(f"[EXEC] Market order failed on {exchange_name} for {symbol}: {e}")
