@@ -38,7 +38,7 @@ class ApiHandler:
             "enableRateLimit": True,
         })
 
-        # Test Binance availability if arbitrage logic uses it
+        # Optional Binance check
         if cfg.get("enable_binance"):
             try:
                 temp_binance = ccxtpro.binance()
@@ -120,13 +120,23 @@ class ApiHandler:
 
     @retry
     async def fetch_order_book(self, symbol, limit=5):
-        try:
-            if self.disable_ws:
-                raise RuntimeError("WebSocket is disabled by config.")
-            return await self.exchange.watch_order_book(symbol, limit)
-        except Exception as e:
-            logger.warning(f"[API] WebSocket order book failed for {symbol}: {e}")
-            raise
+        if self.disable_ws:
+            logger.warning(f"[API] WebSocket is disabled — falling back to REST for {symbol}")
+            try:
+                return await self.exchange.fetch_order_book(symbol, limit=limit)
+            except Exception as e:
+                logger.error(f"[API] REST fetch_order_book failed for {symbol}: {e}")
+                return None
+        else:
+            try:
+                return await self.exchange.watch_order_book(symbol, limit)
+            except Exception as e:
+                logger.warning(f"[API] WebSocket order book failed for {symbol}, fallback to REST: {e}")
+                try:
+                    return await self.exchange.fetch_order_book(symbol, limit=limit)
+                except Exception as e2:
+                    logger.error(f"[API] REST fallback also failed for {symbol}: {e2}")
+                    return None
 
     async def create_limit_order(self, symbol, side, amount, price, params):
         try:
