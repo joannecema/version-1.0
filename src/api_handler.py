@@ -64,16 +64,26 @@ class ApiHandler:
     async def fetch_ticker(self, symbol: str):
         return await self.exchange.fetch_ticker(symbol)
 
+    async def get_ticker(self, symbol: str):
+        """
+        Try WebSocket ticker first; fallback to REST if WS fails.
+        """
+        try:
+            return await self.watch_ticker(symbol)
+        except Exception as e:
+            print(f"[API] ⚠️ WebSocket ticker failed for {symbol}, fallback to REST: {e}")
+            return await self.fetch_ticker(symbol)
+
     @retry
     async def fetch_tickers(self, symbols: List[str]) -> Dict[str, dict]:
         """
         Workaround for Phemex not supporting fetch_tickers().
-        Fetch each symbol individually.
+        Fetch each symbol individually using WebSocket + REST fallback.
         """
         results = {}
         for symbol in symbols:
             try:
-                ticker = await self.fetch_ticker(symbol)
+                ticker = await self.get_ticker(symbol)
                 results[symbol] = ticker
             except Exception as e:
                 print(f"[API] ❌ Failed to fetch ticker for {symbol}: {e}")
@@ -81,7 +91,11 @@ class ApiHandler:
 
     @retry
     async def fetch_order_book(self, symbol, limit=5):
-        return await self.exchange.watch_order_book(symbol, limit)
+        try:
+            return await self.exchange.watch_order_book(symbol, limit)
+        except Exception as e:
+            print(f"[API] ⚠️ WebSocket order book failed for {symbol}, no fallback available: {e}")
+            raise e
 
     async def create_limit_order(self, symbol, side, amount, price, params):
         return await self.exchange.create_order(symbol, "limit", side, amount, price, params)
