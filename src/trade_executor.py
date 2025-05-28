@@ -38,13 +38,20 @@ class TradeExecutor:
 
     async def route_order(self, symbol, side, amount):
         p_b, p_a = None, None
-        try:
-            while True:
-                sym, b, a = self.md_queue.get_nowait()
-                if sym == symbol:
-                    p_b, p_a = b, a
-                    break
-        except queue.Empty:
+
+        if self.md_queue:
+            try:
+                while True:
+                    sym, b, a = self.md_queue.get_nowait()
+                    if sym == symbol:
+                        p_b, p_a = b, a
+                        break
+            except queue.Empty:
+                pass
+            except Exception as e:
+                logging.warning(f"[ROUTER] Market data queue failed for {symbol}: {e}")
+
+        if p_b is None or p_a is None:
             try:
                 tick = await self.api.get_ticker(symbol)
                 if not tick:
