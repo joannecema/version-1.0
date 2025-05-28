@@ -8,7 +8,6 @@ from typing import List, Dict
 
 logger = logging.getLogger("ApiHandler")
 
-
 def retry(fn):
     @wraps(fn)
     async def wrapped(*args, **kwargs):
@@ -25,13 +24,12 @@ def retry(fn):
         raise last_exc
     return wrapped
 
-
 class ApiHandler:
     def __init__(self, api_key, api_secret, cfg):
         self.cfg = cfg
         self.disable_ws = cfg.get("disable_ws", False)
-        self.binance_enabled = True
-        self.throttle = asyncio.Semaphore(cfg.get("max_concurrent_requests", 3))  # Throttling limit
+        self.binance_enabled = False if cfg.get("disable_binance", True) else True
+        self.throttle = asyncio.Semaphore(cfg.get("max_concurrent_requests", 3))  # Throttle REST calls
 
         self.exchange = ccxtpro.phemex({
             "apiKey": api_key,
@@ -146,12 +144,12 @@ class ApiHandler:
         try:
             async with self.throttle:
                 market = self.exchange.market(symbol)
-                precision_amount = market['precision']['amount']
-                precision_price = market['precision']['price']
-                formatted_amount = float(f"{amount:.{precision_amount}f}")
-                formatted_price = float(f"{price:.{precision_price}f}")
-                logger.debug(f"[API] Payload → {side.upper()} {symbol} qty={formatted_amount} price={formatted_price} TIF={params}")
-                order = await self.exchange.create_order(symbol, "limit", side, formatted_amount, formatted_price, params)
+                prec_amt = market['precision'].get('amount', 8)
+                prec_prc = market['precision'].get('price', 8)
+                amt = round(float(amount), prec_amt)
+                prc = round(float(price), prec_prc)
+                logger.debug(f"[API] Payload → {side.upper()} {symbol} qty={amt} price={prc} TIF={params}")
+                order = await self.exchange.create_order(symbol, "limit", side, amt, prc, params)
                 logger.info(f"[API] Order placed → ID={order.get('id')} STATUS={order.get('status')}")
                 logger.debug(f"[API] Raw response: {order}")
                 return order
@@ -163,10 +161,10 @@ class ApiHandler:
         try:
             async with self.throttle:
                 market = self.exchange.market(symbol)
-                precision_amount = market['precision']['amount']
-                formatted_amount = float(f"{amount:.{precision_amount}f}")
-                logger.debug(f"[API] Market order → {side.upper()} {symbol} qty={formatted_amount}")
-                return await self.exchange.create_order(symbol, "market", side, formatted_amount)
+                prec_amt = market['precision'].get('amount', 8)
+                amt = round(float(amount), prec_amt)
+                logger.debug(f"[API] Market order → {side.upper()} {symbol} qty={amt}")
+                return await self.exchange.create_order(symbol, "market", side, amt)
         except Exception as e:
             logger.error(f"[API] Failed to place market order for {symbol}: {e}")
             return None
