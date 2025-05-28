@@ -6,12 +6,15 @@ from functools import wraps
 def retry(fn):
     @wraps(fn)
     async def wrapped(*args, **kwargs):
+        last_exc = None
         for i in range(5):
             try:
                 return await fn(*args, **kwargs)
-            except Exception:
+            except Exception as e:
+                last_exc = e
                 await asyncio.sleep((2**i) + random.random())
-        raise
+        # after retries, raise the last exception
+        raise last_exc
     return wrapped
 
 class ApiHandler:
