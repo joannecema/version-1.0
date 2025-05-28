@@ -47,5 +47,7 @@
   "ml_model_path": null,
   "log_file": "trading_bot.log",
   "trade_history_file": "trade_history.csv",
-  "report_interval_cycles": 3600
+  "report_interval_cycles": 3600,
+  "zscore_entry": 1.5,
+  "zscore_exit": 0.5
 }
