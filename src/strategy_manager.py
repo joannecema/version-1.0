@@ -16,7 +16,7 @@ class StrategyManager:
             MarketMakingStrategy(api, tracker, executor, cfg),
             CrossExchangeArbitrageStrategy(api, tracker, executor, cfg)
         ]
-        self.sem = asyncio.Semaphore(10)
+        self.sem = asyncio.Semaphore(self.cfg.get("max_concurrent_strategies", 10))
 
     async def _run_strat(self, strat, sym=None):
         async with self.sem:
@@ -26,20 +26,17 @@ class StrategyManager:
         # cross-exchange arb first
         await self._run_strat(self.strategies[3], None)
 
-        # build dynamic universe
+        # dynamic universe based on volume/spread
         tickers = await self.api.fetch_tickers()
-        scores = []
-        for sym, t in tickers.items():
-            if not sym.endswith("/USDT"):
-                continue
-            spread = t["ask"] - t["bid"]
-            scores.append((sym, t["quoteVolume"] / (spread + 1e-8)))
-        top = [s for s, _ in sorted(scores, key=lambda x: x[1], reverse=True)[: self.cfg["symbols_count"]]]
+        scores = [
+            (sym, t["quoteVolume"] / (t["ask"] - t["bid"] + 1e-8))
+            for sym, t in tickers.items() if sym.endswith("/USDT")
+        ]
+        top = [s for s,_ in sorted(scores, key=lambda x: x[1], reverse=True)][: self.cfg["symbols_count"]]
 
-        # schedule scalping & market-making over top, pairs once
         tasks = []
         for strat in self.strategies[:3]:
-            if strat.__class__.__name__ == "PairsTradingStrategy":
+            if isinstance(strat, PairsTradingStrategy):
                 tasks.append(self._run_strat(strat, None))
             else:
                 for s in top:
