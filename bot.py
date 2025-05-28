@@ -53,8 +53,10 @@ def setup_logging(log_file):
 async def health(request):
     return web.Response(text="OK")
 
-async def shutdown():
+async def shutdown(api):
     logging.info("Shutdown signal received—cleaning up")
+    # close CCXT-Pro exchange session
+    await api.exchange.close()
     asyncio.get_event_loop().stop()
 
 async def start_http(app, cfg):
@@ -92,7 +94,7 @@ async def main():
     # Graceful shutdown handlers
     loop = asyncio.get_event_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, lambda: asyncio.create_task(shutdown()))
+        loop.add_signal_handler(sig, lambda: asyncio.create_task(shutdown(api)))
 
     consecutive_losses = 0
     cycle = 0
