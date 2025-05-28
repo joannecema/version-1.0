@@ -3,6 +3,8 @@ import random
 import time
 import ccxt.pro as ccxtpro
 from functools import wraps
+from typing import List, Dict
+
 
 def retry(fn):
     @wraps(fn)
@@ -16,6 +18,7 @@ def retry(fn):
                 await asyncio.sleep((2**i) + random.random())
         raise last_exc
     return wrapped
+
 
 class ApiHandler:
     def __init__(self, api_key, api_secret, cfg):
@@ -35,14 +38,9 @@ class ApiHandler:
         return await self.exchange.fetch_ohlcv(symbol, timeframe, since, limit, params or {})
 
     async def get_ohlcv(self, symbol, timeframe, limit):
-        """
-        Unified OHLCV fetch: prefer WebSocket; if it fails,
-        fall back to REST with both 'start' and 'end' as Phemex expects.
-        """
         try:
             return await self.watch_ohlcv(symbol, timeframe, limit)
         except Exception:
-            # WS failed — use REST
             await asyncio.sleep(0.1)
             to_ts = int(time.time() * 1000)
             seconds = self.exchange.parse_timeframe(timeframe)
@@ -63,8 +61,23 @@ class ApiHandler:
         return await self.exchange.watch_ticker(symbol)
 
     @retry
-    async def fetch_tickers(self):
-        return await self.exchange.fetch_tickers()
+    async def fetch_ticker(self, symbol: str):
+        return await self.exchange.fetch_ticker(symbol)
+
+    @retry
+    async def fetch_tickers(self, symbols: List[str]) -> Dict[str, dict]:
+        """
+        Workaround for Phemex not supporting fetch_tickers().
+        Fetch each symbol individually.
+        """
+        results = {}
+        for symbol in symbols:
+            try:
+                ticker = await self.fetch_ticker(symbol)
+                results[symbol] = ticker
+            except Exception as e:
+                print(f"[API] ❌ Failed to fetch ticker for {symbol}: {e}")
+        return results
 
     @retry
     async def fetch_order_book(self, symbol, limit=5):
@@ -75,3 +88,6 @@ class ApiHandler:
 
     async def create_market_order(self, symbol, side, amount):
         return await self.exchange.create_order(symbol, "market", side, amount)
+
+    async def close(self):
+        await self.exchange.close()
