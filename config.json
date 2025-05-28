@@ -1,5 +1,15 @@
 {
   "symbols_count": 8,
+  "symbols": [
+    "BTC/USDT",
+    "ETH/USDT",
+    "SOL/USDT",
+    "XRP/USDT",
+    "DOGE/USDT",
+    "AVAX/USDT",
+    "LTC/USDT",
+    "BNB/USDT"
+  ],
   "timeframe": "1m",
   "lookback": 50,
   "sma_short": 20,
