@@ -1,13 +1,14 @@
-import asyncio, random
+import asyncio
+import random
 import ccxt.pro as ccxtpro
 from functools import wraps
 
 def retry(fn):
     @wraps(fn)
-    async def wrapped(*args, **kw):
+    async def wrapped(*args, **kwargs):
         for i in range(5):
             try:
-                return await fn(*args, **kw)
+                return await fn(*args, **kwargs)
             except Exception:
                 await asyncio.sleep((2**i) + random.random())
         raise
@@ -17,10 +18,11 @@ class ApiHandler:
     def __init__(self, api_key, api_secret, cfg):
         self.cfg = cfg
         self.exchange = ccxtpro.phemex({
-            "apiKey": api_key, "secret": api_secret,
+            "apiKey": api_key,
+            "secret": api_secret,
             "enableRateLimit": True,
         })
-        self.exchange.load_markets()
+        # markets will be loaded asynchronously in bot.py before use
 
     @retry
     async def watch_ohlcv(self, symbol, timeframe, limit):
