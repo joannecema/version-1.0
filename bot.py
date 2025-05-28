@@ -7,7 +7,6 @@ import queue
 
 import pandas as pd
 from aiohttp import web
-from prometheus_client import Counter, Gauge, start_http_server
 
 from src.api_handler import ApiHandler
 from src.market_data_fix import start_fix_md_session
@@ -15,10 +14,6 @@ from src.position_tracker import PositionTracker
 from src.trade_executor import TradeExecutor
 from src.strategy_manager import StrategyManager
 from src.strategies.volatility_regime_filter import VolatilityRegimeFilter
-
-# Prometheus metrics
-TRADE_COUNTER = Counter("total_trades", "Total trades executed")
-EQUITY_GAUGE  = Gauge("current_equity", "Live equity")
 
 def validate_config(cfg):
     required = {
@@ -37,10 +32,10 @@ def validate_config(cfg):
         "limit_offset_pct": float,
         "ioc_timeout_ms": int,
         "health_port": int,
-        "metrics_port": int,
         "dynamic_universe": bool,
         "max_consecutive_losses": int,
         "pause_seconds_on_break": int,
+        # remove metrics_port here
     }
     for k, t in required.items():
         if k not in cfg or not isinstance(cfg[k], t):
@@ -57,14 +52,6 @@ def setup_logging(log_file):
 
 async def health(request):
     return web.Response(text="OK")
-
-async def metrics(request):
-    tracker = request.app["tracker"]
-    return web.json_response({
-        "equity": tracker.equity,
-        "open_positions": len(tracker.open_positions),
-        "total_trades": len(tracker.trade_history),
-    })
 
 async def shutdown():
     logging.info("Shutdown signal received—cleaning up")
@@ -87,13 +74,9 @@ async def main():
     setup_logging(cfg["log_file"])
     logging.info("🚀 HFT bot starting…")
 
-    # Prometheus metrics server
-    start_http_server(cfg["metrics_port"])
-
     # FIX Market Data
     md_queue = queue.Queue() if cfg.get("use_fix_md") else None
     if md_queue:
-        # fix_md.cfg lives in repo root, one level above src/
         fix_cfg_path = os.path.join(repo_root, "fix_md.cfg")
         start_fix_md_session(fix_cfg_path, md_queue)
 
@@ -104,11 +87,10 @@ async def main():
     manager = StrategyManager(api, tracker, executor, cfg)
     vrf = VolatilityRegimeFilter(api, cfg)
 
-    # HTTP health & metrics endpoints
+    # HTTP health endpoint
     app = web.Application()
     app["tracker"] = tracker
     app.router.add_get('/health', health)
-    app.router.add_get('/metrics', metrics)
     asyncio.create_task(start_http(app, cfg))
 
     # Graceful shutdown handlers
@@ -154,7 +136,6 @@ async def main():
         else:
             consecutive_losses = 0
 
-        # Throttle next cycle
         await asyncio.sleep(cfg["execution_interval_sec"])
 
 if __name__ == "__main__":
