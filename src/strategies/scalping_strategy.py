@@ -1,55 +1,58 @@
 import logging
-from src.utils import calculate_sma
+from typing import Optional, Tuple
+
+log = logging.getLogger("Scalping")
 
 class ScalpingStrategy:
-    def __init__(self, api, tracker, executor, cfg):
+    def __init__(self, api, config: dict, tracker, executor) -> None:
         self.api = api
+        self.config = config
         self.tracker = tracker
         self.executor = executor
-        self.cfg = cfg
-        self.logger = logging.getLogger("ScalpingStrategy")
 
-        self.timeframe = cfg.get("timeframe", "1m")
-        self.lookback = int(cfg.get("lookback", 50))
-        self.sma_short_period = int(cfg.get("sma_short", 20))
-        self.sma_long_period = int(cfg.get("sma_long", 50))
+        self.volume_multiplier = config.get("scalping_volume_multiplier", 1.5)
+        self.momentum_period = config.get("scalping_momentum_period", 3)
+        self.idle_exit_minutes = config.get("idle_exit_minutes", 5)
+        self.min_roi = config.get("min_roi_threshold", 0.002)
+        self.trailing_enabled = config.get("trailing_stop_enabled", True)
 
-    async def check_and_trade(self, symbol: str):
+    async def check_signal(self, symbol: str) -> Optional[Tuple[str, float]]:
         try:
-            ohlcv = await self.api.get_ohlcv(symbol, self.timeframe, self.lookback + 1)
-            if not ohlcv or len(ohlcv) < self.lookback + 1:
-                self.logger.warning(f"[SCALP] ❌ Not enough OHLCV for {symbol} (have {len(ohlcv)}, need {self.lookback + 1})")
-                return
-
-            closes = [bar[4] for bar in ohlcv if bar and isinstance(bar[4], (int, float))]
-            if len(closes) < max(self.sma_short_period, self.sma_long_period):
-                self.logger.warning(f"[SCALP] ⚠️ Insufficient closing prices for SMA calculation on {symbol}")
-                return
-
-            sma_short = calculate_sma(closes, self.sma_short_period)
-            sma_long = calculate_sma(closes, self.sma_long_period)
-            current_price = closes[-1]
-
-            if sma_short is None or sma_long is None:
-                self.logger.warning(f"[SCALP] ❌ SMA calculation failed for {symbol}")
-                return
-
-            self.logger.debug(
-                f"[SCALP] {symbol} price={current_price:.4f} | SMA{self.sma_short_period}={sma_short:.4f} | SMA{self.sma_long_period}={sma_long:.4f}"
-            )
-
-            # ENTRY condition
-            if sma_short > sma_long and not self.tracker.has_position(symbol):
-                self.logger.info(f"[SCALP] ✅ Enter LONG {symbol} @ {current_price:.4f}")
-                await self.executor.enter_long(symbol, current_price)
-
-            # EXIT condition
-            elif sma_short < sma_long:
-                if self.tracker.has_long(symbol):
-                    self.logger.info(f"[SCALP] ❌ Exit LONG {symbol} @ {current_price:.4f}")
-                    await self.executor.exit_position(symbol, current_price)
-                else:
-                    self.logger.debug(f"[SCALP] ⏩ No active long to exit for {symbol}")
-
+            ohlcv = await self.api.fetch_ohlcv(symbol, timeframe='1m', limit=self.momentum_period + 1)
         except Exception as e:
-            self.logger.error(f"[SCALP] ❌ Error during check_and_trade for {symbol}: {e}")
+            log.error(f"[SCALPING] ❌ Failed to fetch OHLCV for {symbol}: {e}")
+            return None
+
+        if not ohlcv or len(ohlcv) < self.momentum_period + 1:
+            log.warning(f"[SCALPING] ⚠️ Not enough OHLCV data for {symbol} (received {len(ohlcv)})")
+            return None
+
+        close_prices = [bar[4] for bar in ohlcv]
+        if len(close_prices) < 2:
+            log.warning(f"[SCALPING] ⚠️ Invalid close data for {symbol}")
+            return None
+
+        momentum = close_prices[-1] - close_prices[0]
+        percent_change = (momentum / close_prices[0]) if close_prices[0] else 0
+
+        if abs(percent_change) < self.min_roi:
+            log.debug(f"[SCALPING] ❌ No momentum breakout for {symbol} (Δ={percent_change:.5f})")
+            return None
+
+        try:
+            vol_now = ohlcv[-1][5]
+            vol_prev = sum([bar[5] for bar in ohlcv[:-1]]) / len(ohlcv[:-1])
+        except Exception as e:
+            log.warning(f"[SCALPING] ⚠️ Volume calc error for {symbol}: {e}")
+            return None
+
+        if vol_now < vol_prev * self.volume_multiplier:
+            log.debug(f"[SCALPING] ❌ Volume not high enough on {symbol} — {vol_now:.2f} < {vol_prev:.2f}")
+            return None
+
+        side = "buy" if percent_change > 0 else "sell"
+        capital = self.tracker.get_available_capital()
+        size = self.executor.calculate_order_size(symbol, capital)
+
+        log.info(f"[SCALPING] ✅ Signal confirmed: {symbol} | side={side.upper()} | Δ={percent_change:.4f} | size={size}")
+        return side, size
