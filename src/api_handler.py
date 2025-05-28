@@ -38,7 +38,6 @@ class ApiHandler:
             "enableRateLimit": True,
         })
 
-        # Optional Binance check
         if cfg.get("enable_binance"):
             try:
                 temp_binance = ccxtpro.binance()
@@ -141,9 +140,15 @@ class ApiHandler:
     async def create_limit_order(self, symbol, side, amount, price, params):
         try:
             market = self.exchange.market(symbol)
-            amount = float(f"{amount:.{market['precision']['amount']}f}")
-            price = float(f"{price:.{market['precision']['price']}f}")
-            return await self.exchange.create_order(symbol, "limit", side, amount, price, params)
+            precision_amount = market['precision']['amount']
+            precision_price = market['precision']['price']
+            formatted_amount = float(f"{amount:.{precision_amount}f}")
+            formatted_price = float(f"{price:.{precision_price}f}")
+            logger.debug(f"[API] Payload → {side.upper()} {symbol} qty={formatted_amount} price={formatted_price} TIF={params}")
+            order = await self.exchange.create_order(symbol, "limit", side, formatted_amount, formatted_price, params)
+            logger.info(f"[API] Order placed → ID={order.get('id')} STATUS={order.get('status')}")
+            logger.debug(f"[API] Raw response: {order}")
+            return order
         except Exception as e:
             logger.error(f"[API] Failed to place limit order for {symbol}: {e}")
             return None
@@ -151,8 +156,10 @@ class ApiHandler:
     async def create_market_order(self, symbol, side, amount):
         try:
             market = self.exchange.market(symbol)
-            amount = float(f"{amount:.{market['precision']['amount']}f}")
-            return await self.exchange.create_order(symbol, "market", side, amount)
+            precision_amount = market['precision']['amount']
+            formatted_amount = float(f"{amount:.{precision_amount}f}")
+            logger.debug(f"[API] Market order → {side.upper()} {symbol} qty={formatted_amount}")
+            return await self.exchange.create_order(symbol, "market", side, formatted_amount)
         except Exception as e:
             logger.error(f"[API] Failed to place market order for {symbol}: {e}")
             return None
