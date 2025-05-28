@@ -9,35 +9,41 @@ class ScalpingStrategy:
         self.cfg = cfg
         self.logger = logging.getLogger("ScalpingStrategy")
 
-    async def check_and_trade(self, symbol):
-        try:
-            tf = self.cfg["timeframe"]
-            lb = self.cfg["lookback"]
+        self.timeframe = cfg.get("timeframe", "1m")
+        self.lookback = int(cfg.get("lookback", 50))
+        self.sma_short_period = int(cfg.get("sma_short", 20))
+        self.sma_long_period = int(cfg.get("sma_long", 50))
 
-            ohlcv = await self.api.get_ohlcv(symbol, tf, lb + 1)
-            if len(ohlcv) < lb + 1:
-                self.logger.warning(f"[SCALP] Not enough OHLCV data for {symbol} (have {len(ohlcv)}, need {lb + 1})")
+    async def check_and_trade(self, symbol: str):
+        try:
+            ohlcv = await self.api.get_ohlcv(symbol, self.timeframe, self.lookback + 1)
+            if not ohlcv or len(ohlcv) < self.lookback + 1:
+                self.logger.warning(f"[SCALP] Not enough OHLCV data for {symbol} (have {len(ohlcv)}, need {self.lookback + 1})")
                 return
 
             closes = [bar[4] for bar in ohlcv]
-            sma_short = calculate_sma(closes, self.cfg["sma_short"])
-            sma_long  = calculate_sma(closes, self.cfg["sma_long"])
-            price = closes[-1]
+            sma_short = calculate_sma(closes, self.sma_short_period)
+            sma_long = calculate_sma(closes, self.sma_long_period)
+            current_price = closes[-1]
 
             if sma_short is None or sma_long is None:
-                self.logger.warning(f"[SCALP] SMA calculation failed for {symbol}")
+                self.logger.warning(f"[SCALP] Failed to compute SMA for {symbol} | short={sma_short}, long={sma_long}")
                 return
 
-            if sma_short > sma_long and not self.tracker.has_position(symbol):
-                self.logger.info(f"[SCALP] Entry {symbol} @ {price}")
-                await self.executor.enter_long(symbol, price)
+            self.logger.debug(f"[SCALP] {symbol} price={current_price:.4f} | SMA{self.sma_short_period}={sma_short:.4f} SMA{self.sma_long_period}={sma_long:.4f}")
 
+            # ENTRY logic
+            if sma_short > sma_long and not self.tracker.has_position(symbol):
+                self.logger.info(f"[SCALP] ✅ Enter LONG {symbol} @ {current_price:.4f}")
+                await self.executor.enter_long(symbol, current_price)
+
+            # EXIT logic
             elif sma_short < sma_long:
-                if hasattr(self.tracker, "has_long") and self.tracker.has_long(symbol):
-                    self.logger.info(f"[SCALP] Exit {symbol} @ {price}")
-                    await self.executor.exit_position(symbol, price)
+                if self.tracker.has_long(symbol):
+                    self.logger.info(f"[SCALP] ❌ Exit LONG {symbol} @ {current_price:.4f}")
+                    await self.executor.exit_position(symbol, current_price)
                 else:
-                    self.logger.debug(f"[SCALP] No long position to exit for {symbol}")
+                    self.logger.debug(f"[SCALP] Skipped exit — no active long position for {symbol}")
 
         except Exception as e:
-            self.logger.error(f"[SCALP] Error on {symbol}: {e}")
+            self.logger.error(f"[SCALP] Error processing {symbol}: {e}")
