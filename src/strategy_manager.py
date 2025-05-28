@@ -1,87 +1,60 @@
-import asyncio
 import logging
-
-from src.strategies.scalping_strategy import ScalpingStrategy
-from src.strategies.pairs_trading_strategy import PairsTradingStrategy
-from src.strategies.market_making_strategy import MarketMakingStrategy
-from src.strategies.cross_exchange_arbitrage_strategy import CrossExchangeArbitrageStrategy
+import asyncio
 
 log = logging.getLogger("StrategyManager")
 
 class StrategyManager:
-    def __init__(self, api, tracker, executor, cfg):
+    def __init__(self, config, api, tracker, executor):
+        self.config = config
         self.api = api
         self.tracker = tracker
-        self.exec = executor
-        self.cfg = cfg
+        self.executor = executor
+        self.cooldowns = {}
 
-        self.strategies = [
-            ScalpingStrategy(api, tracker, executor, cfg),
-            PairsTradingStrategy(api, tracker, executor, cfg),
-            MarketMakingStrategy(api, tracker, executor, cfg),
-            CrossExchangeArbitrageStrategy(api, tracker, executor, cfg),
-        ]
+        # Strategy class mapping (ensure these are imported properly)
+        from src.strategy_scalping import ScalpingStrategy
+        from src.strategy_breakout import BreakoutStrategy
+        from src.strategy_ema_rsi import EmaRsiStrategy
+        from src.strategy_grid import GridStrategy
 
-        self.sem = asyncio.Semaphore(self.cfg.get("max_concurrent_strategies", 10))
-        self.symbols = self.cfg.get("symbols", [])
+        self.strategies = {
+            "scalping": ScalpingStrategy(api, config, tracker, executor),
+            "volume_breakout": BreakoutStrategy(api, config, tracker, executor),
+            "ema_rsi": EmaRsiStrategy(api, config, tracker, executor),
+            "grid": GridStrategy(api, config, tracker, executor)
+        }
 
-    async def _run_strat(self, strat, sym=None):
-        async with self.sem:
-            try:
-                strategy_name = strat.__class__.__name__
-                log.info(f"[{strategy_name}] Running for: {sym or 'ALL'}")
-                await strat.check_and_trade(sym)
-            except Exception as e:
-                log.error(f"[{strat.__class__.__name__}] Error on {sym or 'ALL'}: {e}")
+    async def execute(self):
+        enabled = self.config.get("strategy_stack", [])
+        symbols = self.config.get("symbols", [])
 
-    async def run_cycle(self):
-        # 1) Run Cross Exchange Arbitrage strategy first (usually symbol-agnostic)
-        try:
-            await self._run_strat(self.strategies[3], None)
-        except Exception as e:
-            log.warning(f"[CrossExchangeArbitrageStrategy] Failed: {e}")
-
-        # 2) Fetch tickers individually (Phemex doesn't support fetch_tickers())
-        try:
-            tickers = await self.api.fetch_tickers(self.symbols)
-        except Exception as e:
-            log.warning(f"[StrategyManager] Failed to fetch tickers: {e}")
-            tickers = {}
-
-        scores = []
-        for sym, t in tickers.items():
-            if not sym.endswith("/USDT"):
+        for strategy_name in enabled:
+            strategy = self.strategies.get(strategy_name)
+            if not strategy:
+                log.warning(f"[STRATEGY] ❌ Strategy {strategy_name} not recognized.")
                 continue
-            try:
-                ask = t.get("ask")
-                bid = t.get("bid")
-                volume = t.get("quoteVolume", 0)
 
-                if ask is None or bid is None or ask <= bid:
+            for symbol in symbols:
+                cooldown_key = f"{strategy_name}:{symbol}"
+                if self.cooldowns.get(cooldown_key, 0) > asyncio.get_event_loop().time():
+                    log.info(f"[STRATEGY] ⏳ Cooldown active for {cooldown_key}")
                     continue
 
-                spread = ask - bid
-                if spread > 0 and volume > 0:
-                    score = volume / spread
-                    scores.append((sym, score))
-            except Exception as e:
-                log.warning(f"[StrategyManager] Skipping {sym} due to error: {e}")
-                continue
-
-        top = [s for s, _ in sorted(scores, key=lambda x: x[1], reverse=True)]
-        top = top[:self.cfg.get("symbols_count", 10)]
-
-        # 3) Run scalping, market-making, and pairs-trading strategies
-        tasks = []
-        for strat in self.strategies[:3]:
-            try:
-                if isinstance(strat, PairsTradingStrategy):
-                    tasks.append(self._run_strat(strat, None))  # Global check for pairs
-                else:
-                    for s in top:
-                        tasks.append(self._run_strat(strat, s))
-            except Exception as e:
-                log.error(f"[{strat.__class__.__name__}] Strategy scheduling failed: {e}")
-
-        if tasks:
-            await asyncio.gather(*tasks)
+                try:
+                    signal = await strategy.check_signal(symbol)
+                    if signal:
+                        side, size = signal
+                        if self.tracker.has_open_position(symbol):
+                            log.info(f"[STRATEGY] 🔄 {symbol} already in open position — skipping {strategy_name}")
+                            continue
+                        result = await self.executor.execute_order(symbol, side, size)
+                        if result:
+                            self.tracker.record_entry(symbol, side, size, result['price'])
+                        else:
+                            log.warning(f"[STRATEGY] ⚠️ Order rejected or failed for {symbol}")
+                            self.cooldowns[cooldown_key] = asyncio.get_event_loop().time() + 60  # 1-min cooldown
+                    else:
+                        log.debug(f"[STRATEGY] ❌ No signal for {symbol} in {strategy_name}")
+                except Exception as e:
+                    log.error(f"[STRATEGY] 💥 Error in {strategy_name} on {symbol}: {e}")
+                    self.cooldowns[cooldown_key] = asyncio.get_event_loop().time() + 90  # backoff on error
