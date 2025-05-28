@@ -2,6 +2,7 @@ import asyncio
 import random
 import ccxt.pro as ccxtpro
 from functools import wraps
+import time
 
 def retry(fn):
     @wraps(fn)
@@ -24,25 +25,34 @@ class ApiHandler:
             "secret": api_secret,
             "enableRateLimit": True,
         })
-        # markets loaded in bot.py
 
     @retry
     async def watch_ohlcv(self, symbol, timeframe, limit):
         return await self.exchange.watch_ohlcv(symbol, timeframe, limit)
 
     @retry
-    async def fetch_ohlcv(self, symbol, timeframe, since=None, limit=None):
-        return await self.exchange.fetch_ohlcv(symbol, timeframe, since, limit)
+    async def fetch_ohlcv(self, symbol, timeframe, since=None, limit=None, params=None):
+        # ccxt signature is fetch_ohlcv(symbol, timeframe, since, limit, params)
+        return await self.exchange.fetch_ohlcv(symbol, timeframe, since, limit, params or {})
 
     async def get_ohlcv(self, symbol, timeframe, limit):
         """
-        Unified OHLCV fetch: WS first, then REST.
+        Unified OHLCV fetch: WS first, then REST with required 'to' param for Phemex.
         """
         try:
             return await self.watch_ohlcv(symbol, timeframe, limit)
         except Exception:
+            # WS failed—fall back to REST
             await asyncio.sleep(0.1)
-            return await self.fetch_ohlcv(symbol, timeframe, None, limit)
+            # Phemex REST requires a 'to' timestamp
+            to_ts = int(time.time() * 1000)
+            return await self.fetch_ohlcv(
+                symbol,
+                timeframe,
+                since=None,
+                limit=limit,
+                params={"to": to_ts},
+            )
 
     @retry
     async def watch_ticker(self, symbol):
