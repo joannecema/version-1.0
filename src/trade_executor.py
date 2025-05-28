@@ -36,19 +36,6 @@ class TradeExecutor:
             except Exception:
                 pass
 
-    def sanitize_order_params(self, params):
-        clean = {}
-        for k, v in (params or {}).items():
-            try:
-                if isinstance(v, str) or isinstance(v, float):
-                    clean[k] = int(float(v))
-                else:
-                    clean[k] = v
-            except Exception as e:
-                logging.warning(f"[SANITIZE] Could not cast param {k}={v}: {e}")
-                clean[k] = v
-        return clean
-
     async def route_order(self, symbol, side, amount):
         p_b, p_a = None, None
 
@@ -75,6 +62,14 @@ class TradeExecutor:
                 logging.error(f"[ROUTER] Failed to get Phemex ticker for {symbol}: {e}")
                 return None
 
+        market = self.api.exchange.markets.get(symbol)
+        if not market:
+            logging.error(f"[ROUTER] Market not found for {symbol}")
+            return None
+
+        precision_price = market['precision'].get('price', 4)
+        precision_amount = market['precision'].get('amount', 6)
+
         bin_b = bin_a = None
         if self.binance_enabled and self.binance:
             try:
@@ -85,34 +80,34 @@ class TradeExecutor:
                 self.binance_enabled = False
 
         if side == "buy":
-            best, venue = (p_a, "phemex")
-            if bin_a is not None and self.binance_enabled:
-                best, venue = min((p_a, "phemex"), (bin_a, "binance"))
+            best, venue = (min((p_a, "phemex"), (bin_a, "binance"))
+                           if bin_a and self.binance_enabled else (p_a, "phemex"))
         else:
-            best, venue = (p_b, "phemex")
-            if bin_b is not None and self.binance_enabled:
-                best, venue = max((p_b, "phemex"), (bin_b, "binance"))
+            best, venue = (max((p_b, "phemex"), (bin_b, "binance"))
+                           if bin_b and self.binance_enabled else (p_b, "phemex"))
 
         if best is None:
             logging.error(f"[ROUTER] No valid price found for {symbol}")
             return None
 
-        precision = self.cfg.get("price_precision", 4)
-        price = round(best, precision)
+        price = round(best, precision_price)
+        qty = round(amount, precision_amount)
         symbol_id = self.api.exchange.market_id(symbol)
-        logging.info(f"[ROUTER] {side.upper()} {symbol}@{price} via {venue}")
-        logging.debug(f"[PAYLOAD] symbol_id={symbol_id}, side={side}, amount={amount}, price={price}, timeInForce=IOC")
+
+        price_str = str(price)
+        qty_str = str(qty)
+
+        logging.info(f"[ROUTER] {side.upper()} {symbol}@{price_str} via {venue}")
+        logging.debug(f"[PAYLOAD] symbol_id={symbol_id}, side={side}, qty={qty_str}, price={price_str}, timeInForce=IOC")
 
         try:
-            params = self.sanitize_order_params({"timeInForce": "IOC"})
-
             if venue == "phemex":
                 result = await self.api.exchange.create_order(
-                    symbol_id, "limit", side, amount, price, params
+                    symbol_id, "limit", side, qty_str, price_str, {"timeInForce": "IOC"}
                 )
             elif venue == "binance" and self.binance_enabled:
                 result = await self.binance.create_order(
-                    symbol, "limit", side, amount, price, params
+                    symbol, "limit", side, qty_str, price_str, {"timeInForce": "IOC"}
                 )
             else:
                 result = None
