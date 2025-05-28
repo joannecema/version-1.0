@@ -1,8 +1,8 @@
 import asyncio
 import random
+import time
 import ccxt.pro as ccxtpro
 from functools import wraps
-import time
 
 def retry(fn):
     @wraps(fn)
@@ -32,26 +32,32 @@ class ApiHandler:
 
     @retry
     async def fetch_ohlcv(self, symbol, timeframe, since=None, limit=None, params=None):
-        # ccxt signature is fetch_ohlcv(symbol, timeframe, since, limit, params)
+        # ccxt signature: fetch_ohlcv(symbol, timeframe, since, limit, params)
         return await self.exchange.fetch_ohlcv(symbol, timeframe, since, limit, params or {})
 
     async def get_ohlcv(self, symbol, timeframe, limit):
         """
-        Unified OHLCV fetch: WS first, then REST with required 'to' param for Phemex.
+        Unified OHLCV fetch: try WebSocket first;
+        on fallback, supply both 'from' and 'to' for Phemex REST.
         """
         try:
             return await self.watch_ohlcv(symbol, timeframe, limit)
         except Exception:
             # WS failed—fall back to REST
             await asyncio.sleep(0.1)
-            # Phemex REST requires a 'to' timestamp
             to_ts = int(time.time() * 1000)
+            # parse timeframe into seconds (e.g. "1m" → 60)
+            seconds = self.exchange.parse_timeframe(timeframe)
+            from_ts = to_ts - limit * seconds * 1000
             return await self.fetch_ohlcv(
                 symbol,
                 timeframe,
-                since=None,
+                since=from_ts,
                 limit=limit,
-                params={"to": to_ts},
+                params={
+                    "from": from_ts,
+                    "to": to_ts,
+                },
             )
 
     @retry
