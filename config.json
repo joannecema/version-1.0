@@ -28,15 +28,15 @@
   "health_port": 8000,
   "metrics_port": 8001,
   "dynamic_universe": true,
-  "pairs": [
+  "pairs_strategy_pairs": [
     ["BTC/USDT", "ETH/USDT"],
     ["SOL/USDT", "ADA/USDT"]
   ],
-  "market_make_spread_pct": 0.0002,
-  "market_make_size_usdt": 5,
   "cross_ex_pairs": [
     ["BTC/USDT", "ETH/USDT"]
   ],
+  "market_make_spread_pct": 0.0002,
+  "market_make_size_usdt": 5,
   "arb_threshold_pct": 0.0015,
   "volatility_threshold_atr": 0.002,
   "threshold": 0.002,
@@ -49,5 +49,7 @@
   "trade_history_file": "trade_history.csv",
   "report_interval_cycles": 3600,
   "zscore_entry": 1.5,
-  "zscore_exit": 0.5
+  "zscore_exit": 0.5,
+  "min_usdt_balance": 5,
+  "min_roi_after_fees_pct": 0.001
 }
