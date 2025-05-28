@@ -140,14 +140,31 @@ class ApiHandler:
 
     async def create_limit_order(self, symbol, side, amount, price, params):
         try:
-            return await self.exchange.create_order(symbol, "limit", side, amount, price, params)
+            market = self.exchange.market(symbol)
+            precision_amount = round(amount, market['precision']['amount'])
+            precision_price = round(price, market['precision']['price'])
+            return await self.exchange.create_order(
+                symbol=symbol,
+                type="limit",
+                side=side,
+                amount=precision_amount,
+                price=precision_price,
+                params=params or {}
+            )
         except Exception as e:
             logger.error(f"[API] Failed to place limit order for {symbol}: {e}")
             return None
 
     async def create_market_order(self, symbol, side, amount):
         try:
-            return await self.exchange.create_order(symbol, "market", side, amount)
+            market = self.exchange.market(symbol)
+            precision_amount = round(amount, market['precision']['amount'])
+            return await self.exchange.create_order(
+                symbol=symbol,
+                type="market",
+                side=side,
+                amount=precision_amount
+            )
         except Exception as e:
             logger.error(f"[API] Failed to place market order for {symbol}: {e}")
             return None
