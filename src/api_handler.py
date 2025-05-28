@@ -13,7 +13,6 @@ def retry(fn):
             except Exception as e:
                 last_exc = e
                 await asyncio.sleep((2**i) + random.random())
-        # after retries, raise the last exception
         raise last_exc
     return wrapped
 
@@ -25,11 +24,32 @@ class ApiHandler:
             "secret": api_secret,
             "enableRateLimit": True,
         })
-        # markets will be loaded asynchronously in bot.py before use
+        # markets loaded in bot.py
 
     @retry
     async def watch_ohlcv(self, symbol, timeframe, limit):
         return await self.exchange.watch_ohlcv(symbol, timeframe, limit)
+
+    @retry
+    async def fetch_ohlcv(self, symbol, timeframe, since=None, limit=None):
+        return await self.exchange.fetch_ohlcv(symbol, timeframe, since, limit)
+
+    async def get_ohlcv(self, symbol, timeframe, limit):
+        """
+        Try WS first, then fall back to REST if it errors.
+        Returns a list of [timestamp, open, high, low, close, volume].
+        """
+        try:
+            return await self.watch_ohlcv(symbol, timeframe, limit)
+        except Exception as ws_err:
+            # WS failed—fallback to REST
+            await asyncio.sleep(0.1)
+            try:
+                # since=None -> most recent; ccxt uses limit positional
+                return await self.fetch_ohlcv(symbol, timeframe, None, limit)
+            except Exception as rest_err:
+                # bubble up the REST error
+                raise RuntimeError(f"get_ohlcv REST failed: {rest_err}") from rest_err
 
     @retry
     async def watch_ticker(self, symbol):
