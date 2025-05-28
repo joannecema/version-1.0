@@ -21,22 +21,25 @@ class TradeExecutor:
                     break
         except queue.Empty:
             try:
-                tick = await self.api.get_ticker(symbol)  # ✅ uses safe fallback
+                tick = await self.api.get_ticker(symbol)
+                if not tick:
+                    logging.error(f"[ROUTER] Phemex ticker for {symbol} is None")
+                    return None
                 p_b, p_a = tick.get("bid"), tick.get("ask")
             except Exception as e:
                 logging.error(f"[ROUTER] Failed to get Phemex ticker for {symbol}: {e}")
-                return
+                return None
 
         try:
             b_tick = await self.binance.watch_ticker(symbol)
             bin_b, bin_a = b_tick.get("bid"), b_tick.get("ask")
         except Exception as e:
             logging.error(f"[ROUTER] Failed to get Binance ticker for {symbol}: {e}")
-            return
+            return None
 
         if None in (p_b, p_a, bin_b, bin_a):
             logging.warning(f"[ROUTER] Incomplete ticker data for {symbol}")
-            return
+            return None
 
         if side == "buy":
             best, venue = min((p_a, "phemex"), (bin_a, "binance"))
@@ -51,11 +54,13 @@ class TradeExecutor:
                 return await self.binance.create_order(symbol, "limit", side, amount, best, {"timeInForce": "IOC"})
         except Exception as e:
             logging.error(f"[ROUTER] Order placement failed for {symbol} on {venue}: {e}")
+            return None
 
     async def enter(self, symbol, side, amount, tp, sl):
         logging.info(f"[EXEC] ENTRY {side.upper()} {symbol} qty={amount:.6f}")
-        await self.route_order(symbol, side, amount)
-        self.tracker.record_entry(symbol, side, amount, tp, tp, sl)  # assumes entry_price == tp
+        result = await self.route_order(symbol, side, amount)
+        if result:
+            self.tracker.record_entry(symbol, side, amount, tp, tp, sl)
 
     async def exit(self, symbol, exit_price=None):
         try:
@@ -66,14 +71,23 @@ class TradeExecutor:
 
         side = "sell" if pos["side"] == "buy" else "buy"
         try:
-            price = exit_price or (await self.api.get_ticker(symbol)).get("last")
+            ticker = await self.api.get_ticker(symbol)
+            if not ticker:
+                logging.warning(f"[EXEC] No ticker data available to exit {symbol}")
+                return
+            price = exit_price or ticker.get("last")
         except Exception as e:
             logging.error(f"[EXEC] Failed to fetch exit price for {symbol}: {e}")
             return
 
+        if price is None:
+            logging.warning(f"[EXEC] Exit price is None for {symbol}")
+            return
+
         logging.info(f"[EXEC] EXIT {side.upper()} {symbol} @ {price:.2f}")
-        await self.route_order(symbol, side, pos["amount"])
-        self.tracker.record_exit(symbol, price)
+        result = await self.route_order(symbol, side, pos["amount"])
+        if result:
+            self.tracker.record_exit(symbol, price)
 
     async def market_cross_order(self, exchange_name, symbol, side, amount):
         try:
