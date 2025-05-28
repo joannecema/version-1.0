@@ -29,7 +29,7 @@ class ApiHandler:
         self.cfg = cfg
         self.disable_ws = cfg.get("disable_ws", False)
         self.binance_enabled = False if cfg.get("disable_binance", True) else True
-        self.throttle = asyncio.Semaphore(cfg.get("max_concurrent_requests", 3))  # Throttle REST calls
+        self.throttle = asyncio.Semaphore(cfg.get("max_concurrent_requests", 3))
 
         self.exchange = ccxtpro.phemex({
             "apiKey": api_key,
@@ -148,8 +148,20 @@ class ApiHandler:
                 prec_prc = market['precision'].get('price', 8)
                 amt = round(float(amount), prec_amt)
                 prc = round(float(price), prec_prc)
-                logger.debug(f"[API] Payload → {side.upper()} {symbol} qty={amt} price={prc} TIF={params}")
-                order = await self.exchange.create_order(symbol, "limit", side, amt, prc, params)
+
+                # Sanitize and convert params
+                clean_params = {}
+                for k, v in (params or {}).items():
+                    if isinstance(v, float):
+                        try:
+                            clean_params[k] = int(float(v))
+                        except Exception:
+                            clean_params[k] = str(int(round(v)))
+                    else:
+                        clean_params[k] = v
+
+                logger.debug(f"[API] Payload → {side.upper()} {symbol} qty={amt} price={prc} PARAMS={clean_params}")
+                order = await self.exchange.create_order(symbol, "limit", side, amt, prc, clean_params)
                 logger.info(f"[API] Order placed → ID={order.get('id')} STATUS={order.get('status')}")
                 logger.debug(f"[API] Raw response: {order}")
                 return order
