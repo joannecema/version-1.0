@@ -3,7 +3,6 @@ import json
 import asyncio
 import logging
 import signal
-import queue
 
 import pandas as pd
 from aiohttp import web
@@ -34,6 +33,9 @@ def validate_config(cfg):
         "dynamic_universe": bool,
         "max_consecutive_losses": int,
         "pause_seconds_on_break": int,
+        "report_interval_cycles": int,
+        "log_file": str,
+        "trade_history_file": str
     }
     for k, t in required.items():
         if k not in cfg or not isinstance(cfg[k], t):
@@ -64,20 +66,22 @@ async def start_http(app, cfg):
 async def main():
     # Load and validate config
     repo_root = os.path.dirname(os.path.abspath(__file__))
-    cfg_path = os.path.join(repo_root, "config.json")
-    cfg = json.load(open(cfg_path))
+    cfg = json.load(open(os.path.join(repo_root, "config.json")))
     validate_config(cfg)
 
-    # Logging
+    # Setup logging
     setup_logging(cfg["log_file"])
     logging.info("🚀 HFT bot starting…")
 
-    # Initialize core components
+    # Initialize API and load markets
     api = ApiHandler(os.getenv("API_KEY"), os.getenv("API_SECRET"), cfg)
-    tracker = PositionTracker(cfg)
+    await api.exchange.load_markets()
+
+    # Core components
+    tracker  = PositionTracker(cfg)
     executor = TradeExecutor(api, tracker, cfg, md_queue=None)
-    manager = StrategyManager(api, tracker, executor, cfg)
-    vrf = VolatilityRegimeFilter(api, cfg)
+    manager  = StrategyManager(api, tracker, executor, cfg)
+    vrf      = VolatilityRegimeFilter(api, cfg)
 
     # HTTP health endpoint
     app = web.Application()
@@ -95,26 +99,22 @@ async def main():
 
     # Main loop
     while True:
-        # Circuit breaker pause
         if consecutive_losses >= cfg["max_consecutive_losses"]:
             logging.warning("Circuit breaker – pausing")
             await asyncio.sleep(cfg["pause_seconds_on_break"])
             consecutive_losses = 0
 
-        # Volatility regime filter
         if not await vrf.allow_trading("BTC/USDT"):
             logging.info("High volatility – skipping cycle")
             await asyncio.sleep(cfg["execution_interval_sec"])
             continue
 
-        # Run all strategies
         await manager.run_cycle()
         cycle += 1
 
-        # Periodic report
         if cycle % cfg["report_interval_cycles"] == 0:
             df = pd.DataFrame(tracker.trade_history)
-            wins = len(df[df["pnl"] > 0])
+            wins  = len(df[df["pnl"] > 0])
             total = len(df)
             logging.info(
                 f"Equity: ${tracker.equity:.2f} | "
@@ -122,7 +122,6 @@ async def main():
                 f"Trades: {total} | Wins: {wins}"
             )
 
-        # Update consecutive losses counter
         if tracker.trade_history and tracker.trade_history[-1]["pnl"] < 0:
             consecutive_losses += 1
         else:
