@@ -24,7 +24,6 @@ def retry(fn):
         raise last_exc
     return wrapped
 
-
 class ApiHandler:
     def __init__(self, api_key, api_secret, cfg):
         self.cfg = cfg
@@ -38,7 +37,7 @@ class ApiHandler:
             "enableRateLimit": True,
         })
 
-        self.market_map = {}  # Normalized: 'BTC/USDT' → market['id']
+        self.market_map = {}
 
     async def load_markets(self):
         try:
@@ -52,17 +51,14 @@ class ApiHandler:
             raise
 
     def get_market_id(self, symbol: str) -> str:
-        return self.market_map.get(symbol) or self.exchange.market(symbol)["id"]
-
-    async def _check_binance_block(self, client):
         try:
-            await client.load_markets()
+            market = self.exchange.market(symbol)
+            market_id = market["id"]
+            logger.debug(f"[API] Resolved market_id for {symbol} → {market_id}")
+            return market_id
         except Exception as e:
-            if "restricted location" in str(e).lower() or "451" in str(e):
-                logger.error(f"[BINANCE] Blocked in region: {e}")
-                self.binance_enabled = False
-        finally:
-            await client.close()
+            logger.error(f"[API] ❌ Failed to resolve market_id for {symbol}: {e}")
+            raise
 
     @retry
     async def watch_ohlcv(self, symbol, timeframe, limit):
@@ -158,6 +154,7 @@ class ApiHandler:
     async def create_limit_order(self, symbol, side, amount, price, params):
         try:
             async with self.throttle:
+                market_id = self.get_market_id(symbol)
                 market = self.exchange.market(symbol)
                 prec_amt = market['precision'].get('amount', 8)
                 prec_prc = market['precision'].get('price', 8)
@@ -175,7 +172,7 @@ class ApiHandler:
                         clean_params[k] = v
 
                 logger.debug(f"[API] Payload → {side.upper()} {symbol} qty={amt} price={prc} PARAMS={clean_params}")
-                order = await self.exchange.create_order(symbol, "limit", side, amt, prc, clean_params)
+                order = await self.exchange.create_order(market_id, "limit", side, amt, prc, clean_params)
                 logger.info(f"[API] Order placed → ID={order.get('id')} STATUS={order.get('status')}")
                 logger.debug(f"[API] Raw response: {order}")
                 return order
@@ -186,11 +183,12 @@ class ApiHandler:
     async def create_market_order(self, symbol, side, amount):
         try:
             async with self.throttle:
+                market_id = self.get_market_id(symbol)
                 market = self.exchange.market(symbol)
                 prec_amt = market['precision'].get('amount', 8)
                 amt = round(float(amount), prec_amt)
                 logger.debug(f"[API] Market order → {side.upper()} {symbol} qty={amt}")
-                return await self.exchange.create_order(symbol, "market", side, amt)
+                return await self.exchange.create_order(market_id, "market", side, amt)
         except Exception as e:
             logger.error(f"[API] Failed to place market order for {symbol}: {e}")
             return None
@@ -199,7 +197,11 @@ class ApiHandler:
     async def fetch_open_orders(self, symbol=None):
         try:
             async with self.throttle:
-                return await self.exchange.fetch_open_orders(symbol) if symbol else await self.exchange.fetch_open_orders()
+                if symbol:
+                    market_id = self.get_market_id(symbol)
+                    return await self.exchange.fetch_open_orders(market_id)
+                else:
+                    return await self.exchange.fetch_open_orders()
         except Exception as e:
             logger.error(f"[API] Failed to fetch open orders for {symbol or 'ALL'}: {e}")
             return []
