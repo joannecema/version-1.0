@@ -9,19 +9,17 @@ class PairsTradingStrategy:
         self.cfg = cfg
 
     async def check_and_trade(self, _):
-        # dynamic pair universe from config
         pairs = self.cfg["cross_ex_pairs"]
         for sym_a, sym_b in pairs:
             ohlcv_a = await self.api.get_ohlcv(sym_a, self.cfg["timeframe"], self.cfg["lookback"] + 1)
             ohlcv_b = await self.api.get_ohlcv(sym_b, self.cfg["timeframe"], self.cfg["lookback"] + 1)
-            spread_z = calculate_spread_zscore(ohlcv_a, ohlcv_b)
+            z = calculate_spread_zscore(ohlcv_a, ohlcv_b)
 
-            if spread_z > self.cfg["zscore_entry"]:
-                logging.info(f"[PAIRS] Short {sym_a}/Long {sym_b} z={spread_z:.2f}")
+            if z > self.cfg["zscore_entry"]:
+                logging.info(f"[PAIRS] Short {sym_a}/Long {sym_b} z={z:.2f}")
                 await self.executor.enter_short(sym_a)
                 await self.executor.enter_long(sym_b)
-            elif spread_z < -self.cfg["zscore_entry"]:
-                logging.info(f"[PAIRS] Long {sym_a}/Short {sym_b} z={spread_z:.2f}")
+            elif z < -self.cfg["zscore_entry"]:
+                logging.info(f"[PAIRS] Long {sym_a}/Short {sym_b} z={z:.2f}")
                 await self.executor.enter_long(sym_a)
                 await self.executor.enter_short(sym_b)
-            # exit logic omitted for brevity
