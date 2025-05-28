@@ -1,5 +1,8 @@
-ccxt==4.4.82
-numpy==1.26.4
-pandas==2.1.4  # Added for alternative TA calculations
-python-dotenv==1.0.1
-schedule==1.2.1
+ccxt>=2.0.0,<3.0.0
+ccxtpro
+quickfix
+numpy
+pandas
+aiohttp
+websockets
+prometheus-client
