@@ -86,12 +86,15 @@ class TradeExecutor:
             logging.error(f"[ROUTER] No valid price found for {symbol}")
             return None
 
-        logging.info(f"[ROUTER] {side.upper()} {symbol}@{best:.4f} via {venue}")
+        precision = self.cfg.get("price_precision", 4)
+        rounded_price = round(best, precision)
+
+        logging.info(f"[ROUTER] {side.upper()} {symbol}@{rounded_price} via {venue}")
         try:
             if venue == "phemex":
-                result = await self.api.create_limit_order(symbol, side, amount, best, {"timeInForce": "IOC"})
+                result = await self.api.create_limit_order(symbol, side, amount, rounded_price, {"timeInForce": "IOC"})
             elif venue == "binance" and self.binance_enabled:
-                result = await self.binance.create_order(symbol, "limit", side, amount, best, {"timeInForce": "IOC"})
+                result = await self.binance.create_order(symbol, "limit", side, amount, rounded_price, {"timeInForce": "IOC"})
             else:
                 result = None
 
