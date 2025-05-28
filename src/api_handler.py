@@ -32,21 +32,19 @@ class ApiHandler:
 
     @retry
     async def fetch_ohlcv(self, symbol, timeframe, since=None, limit=None, params=None):
-        # ccxt signature: fetch_ohlcv(symbol, timeframe, since, limit, params)
         return await self.exchange.fetch_ohlcv(symbol, timeframe, since, limit, params or {})
 
     async def get_ohlcv(self, symbol, timeframe, limit):
         """
-        Unified OHLCV fetch: try WebSocket first;
-        on fallback, supply both 'from' and 'to' for Phemex REST.
+        Unified OHLCV fetch: prefer WebSocket; if it fails,
+        fall back to REST with both 'start' and 'end' as Phemex expects.
         """
         try:
             return await self.watch_ohlcv(symbol, timeframe, limit)
         except Exception:
-            # WS failed—fall back to REST
+            # WS failed — use REST
             await asyncio.sleep(0.1)
             to_ts = int(time.time() * 1000)
-            # parse timeframe into seconds (e.g. "1m" → 60)
             seconds = self.exchange.parse_timeframe(timeframe)
             from_ts = to_ts - limit * seconds * 1000
             return await self.fetch_ohlcv(
@@ -55,8 +53,8 @@ class ApiHandler:
                 since=from_ts,
                 limit=limit,
                 params={
-                    "from": from_ts,
-                    "to": to_ts,
+                    "start": from_ts,
+                    "end": to_ts,
                 },
             )
 
