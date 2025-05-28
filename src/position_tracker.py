@@ -4,9 +4,9 @@ import logging
 log = logging.getLogger("PositionTracker")
 
 class PositionTracker:
-    def __init__(self, api, config):
-        self.api = api
+    def __init__(self, config, api):
         self.config = config
+        self.api = api
         self.positions = {}  # symbol -> position dict
 
     def record_entry(self, symbol, side, size, price):
@@ -44,7 +44,7 @@ class PositionTracker:
     async def evaluate_open_positions(self):
         now = time.time()
         for symbol, pos in list(self.positions.items()):
-            current_price = await self.api.get_price(symbol)
+            current_price = await self.get_price(symbol)
             if not current_price:
                 log.warning(f"[TRACKER] Skipping evaluation for {symbol} — price unavailable")
                 continue
