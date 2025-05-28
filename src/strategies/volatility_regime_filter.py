@@ -19,22 +19,35 @@ class VolatilityRegimeFilter:
                 self.cfg["lookback"] + 1,
             )
         except Exception as e:
-            log.error(f"[VRF] OHLCV fetch failed for {symbol}: {e}")
+            log.error(f"[VRF] ❌ OHLCV fetch failed for {symbol}: {e}")
             return False
 
-        # closing prices are column index 4
-        closes = [candle[4] for candle in ohlcv]
-        returns = [
-            abs((closes[i] - closes[i - 1]) / closes[i - 1])
-            for i in range(1, len(closes))
-        ]
-        vol = sum(returns) / len(returns)
+        if not ohlcv or len(ohlcv) < 2:
+            log.warning(f"[VRF] ❌ Not enough OHLCV data for {symbol}")
+            return False
+
+        closes = [candle[4] for candle in ohlcv if candle[4] > 0]
+        if len(closes) < 2:
+            log.warning(f"[VRF] ❌ Invalid or insufficient closing price data for {symbol}")
+            return False
+
+        try:
+            returns = [
+                abs((closes[i] - closes[i - 1]) / closes[i - 1])
+                for i in range(1, len(closes))
+            ]
+            vol = sum(returns) / len(returns)
+        except ZeroDivisionError:
+            log.warning(f"[VRF] ⚠️ Division by zero in return calculation for {symbol}")
+            return False
+
         log.info(f"[VRF] {symbol} volatility={vol:.4f}")
 
-        # use explicit 'threshold' if present, otherwise fall back to volatility_threshold_atr
         threshold = self.cfg.get("threshold", self.cfg.get("volatility_threshold_atr"))
         if threshold is None:
-            log.error("[VRF] No volatility threshold configured (neither 'threshold' nor 'volatility_threshold_atr')")
+            log.error("[VRF] ❌ No volatility threshold configured (missing 'threshold' and 'volatility_threshold_atr')")
             return False
 
-        return vol < threshold
+        allowed = vol < threshold
+        log.debug(f"[VRF] {symbol} allowed={allowed} (vol={vol:.5f}, threshold={threshold})")
+        return allowed
