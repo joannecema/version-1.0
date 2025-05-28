@@ -1,82 +1,85 @@
-import time, csv, os
+import time
+import logging
+
+log = logging.getLogger("PositionTracker")
 
 class PositionTracker:
-    def __init__(self, cfg):
-        self.open_positions = {}
-        self.equity = 900.0
-        self.idle_exit_pct = cfg["idle_exit_pct"]
-        self.history_file = cfg["trade_history_file"]
-        self.trade_history = []
+    def __init__(self, api, config):
+        self.api = api
+        self.config = config
+        self.positions = {}  # symbol -> position dict
 
-        if not os.path.isfile(self.history_file):
-            with open(self.history_file, "w", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    "symbol", "side", "entry_time", "exit_time",
-                    "entry_price", "exit_price", "amount", "pnl"
-                ])
-
-    def has_position(self, symbol: str) -> bool:
-        """
-        Returns True if a position is currently open for the given symbol.
-        """
-        return symbol in self.open_positions and self.open_positions[symbol].get("is_open", False)
-
-    def record_entry(self, symbol, side, amount, entry_price, tp, sl):
-        self.open_positions[symbol] = {
-            "side": side,
-            "amount": amount,
-            "entry_price": entry_price,
-            "tp": tp,
-            "sl": sl,
-            "timestamp": time.time(),
-            "is_open": True
-        }
-
-    def record_exit(self, symbol, exit_price):
-        if symbol not in self.open_positions:
-            return  # safety check
-
-        pos = self.open_positions.pop(symbol)
-        pos["is_open"] = False
-
-        pnl = ((exit_price - pos["entry_price"]) if pos["side"] == "buy"
-               else (pos["entry_price"] - exit_price)) * pos["amount"]
-        self.equity += pnl
-
-        rec = {
+    def record_entry(self, symbol, side, size, price):
+        self.positions[symbol] = {
             "symbol": symbol,
-            "side": pos["side"],
-            "entry_time": pos["timestamp"],
-            "exit_time": time.time(),
-            "entry_price": pos["entry_price"],
-            "exit_price": exit_price,
-            "amount": pos["amount"],
-            "pnl": pnl
+            "side": side,
+            "size": size,
+            "entry_price": price,
+            "entry_time": time.time()
         }
+        log.info(f"[TRACKER] 🟢 Entry recorded: {symbol} {side} size={size} @ {price}")
 
-        self.trade_history.append(rec)
-        with open(self.history_file, "a", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(list(rec.values()))
+    def record_exit(self, symbol, exit_price=None):
+        position = self.positions.pop(symbol, None)
+        if not position:
+            log.warning(f"[TRACKER] ⚠️ Tried to exit unknown position for {symbol}")
+            return
+        roi = self._calculate_roi(position["entry_price"], exit_price, position["side"])
+        log.info(f"[TRACKER] 🔴 Exit {symbol} side={position['side']} size={position['size']} @ {exit_price} | ROI={roi:.4f}")
 
-    def should_exit(self, symbol, current_price):
-        if symbol not in self.open_positions:
-            return False
+    def get_open_position(self, symbol):
+        return self.positions.get(symbol)
 
-        pos = self.open_positions[symbol]
-        side = pos["side"]
+    def has_open_position(self, symbol):
+        return symbol in self.positions
 
-        if (side == "buy" and current_price >= pos["tp"]) or \
-           (side == "sell" and current_price <= pos["tp"]):
-            return True
+    def _calculate_roi(self, entry_price, exit_price, side):
+        if not entry_price or not exit_price:
+            return 0.0
+        if side == "long":
+            return (exit_price - entry_price) / entry_price
+        else:
+            return (entry_price - exit_price) / entry_price
 
-        if (side == "buy" and current_price <= pos["sl"]) or \
-           (side == "sell" and current_price >= pos["sl"]):
-            return True
+    async def evaluate_open_positions(self):
+        now = time.time()
+        for symbol, pos in list(self.positions.items()):
+            current_price = await self.api.get_price(symbol)
+            if not current_price:
+                log.warning(f"[TRACKER] Skipping evaluation for {symbol} — price unavailable")
+                continue
 
-        if time.time() - pos["timestamp"] > 60 and \
-           abs((current_price - pos["entry_price"]) / pos["entry_price"]) < self.idle_exit_pct:
-            return True
+            roi = self._calculate_roi(pos["entry_price"], current_price, pos["side"])
+            age = (now - pos["entry_time"]) / 60
+            log.debug(f"[TRACKER] Eval {symbol} ROI={roi:.4f} Age={age:.1f}m")
 
-        return False
+            # Exit on negative ROI
+            if roi < -self.config.get("max_loss_pct", 0.01):
+                log.warning(f"[TRACKER] 📉 Exiting {symbol} — ROI {roi:.4f} below loss limit")
+                await self.api.create_market_order(symbol, "sell", pos["size"])
+                self.record_exit(symbol, current_price)
+
+            # Exit on idle/no movement
+            elif age >= self.config.get("idle_exit_minutes", 3):
+                roi_min = self.config.get("min_roi_idle_exit", 0.0001)
+                if abs(roi) < roi_min:
+                    log.warning(f"[TRACKER] 💤 Idle exit for {symbol} — ROI={roi:.4f} < {roi_min}")
+                    await self.api.create_market_order(symbol, "sell", pos["size"])
+                    self.record_exit(symbol, current_price)
+
+    async def get_available_usdt(self):
+        try:
+            balance = await self.api.exchange.fetch_balance()
+            usdt = balance['USDT']['free']
+            return float(usdt)
+        except Exception as e:
+            log.error(f"[TRACKER] Failed to fetch USDT balance: {e}")
+            return 0
+
+    async def get_price(self, symbol):
+        try:
+            ticker = await self.api.get_ticker(symbol)
+            return ticker['last'] if ticker else None
+        except Exception as e:
+            log.error(f"[TRACKER] Failed to fetch ticker for {symbol}: {e}")
+            return None
