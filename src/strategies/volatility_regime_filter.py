@@ -7,10 +7,6 @@ class VolatilityRegimeFilter:
         self.cfg = cfg
 
     async def allow_trading(self, symbol):
-        """
-        Fetches OHLCV robustly via api.get_ohlcv().
-        Returns False if data fetch fails or ATR > threshold.
-        """
         try:
             ohlcv = await self.api.get_ohlcv(
                 symbol,
