@@ -11,13 +11,30 @@ class TradeExecutor:
         self.cfg = cfg
         self.md_queue = md_queue
 
-        # Detect US deployment
         self.US_DEPLOYMENT = os.getenv("DEPLOY_REGION", "").lower() == "us"
-
-        # Only initialize Binance if not US-based
+        self.binance_enabled = cfg.get("enable_binance", True) and not self.US_DEPLOYMENT
         self.binance = None
-        if not self.US_DEPLOYMENT:
-            self.binance = ccxtpro.binance({"enableRateLimit": True})
+
+        if self.binance_enabled:
+            try:
+                self.binance = ccxtpro.binance({"enableRateLimit": True})
+                asyncio.create_task(self._check_binance_block())
+            except Exception as e:
+                logging.warning(f"[BINANCE] Initialization failed: {e}")
+                self.binance_enabled = False
+
+    async def _check_binance_block(self):
+        try:
+            await self.binance.load_markets()
+        except Exception as e:
+            if "restricted location" in str(e).lower() or "451" in str(e):
+                logging.warning(f"[BINANCE] Access blocked in region: {e}")
+                self.binance_enabled = False
+        finally:
+            try:
+                await self.binance.close()
+            except Exception:
+                pass
 
     async def route_order(self, symbol, side, amount):
         p_b, p_a = None, None
@@ -39,20 +56,21 @@ class TradeExecutor:
                 return None
 
         bin_b = bin_a = None
-        if self.binance:
+        if self.binance_enabled and self.binance:
             try:
-                b_tick = await self.binance.watch_ticker(symbol)
+                b_tick = await self.binance.fetch_ticker(symbol)
                 bin_b, bin_a = b_tick.get("bid"), b_tick.get("ask")
             except Exception as e:
-                logging.warning(f"[ROUTER] Binance ticker fallback failed for {symbol}: {e}")
+                logging.warning(f"[ROUTER] Binance ticker fetch failed for {symbol}: {e}")
+                self.binance_enabled = False
 
         if side == "buy":
-            if bin_a is not None and not self.US_DEPLOYMENT:
+            if bin_a is not None and self.binance_enabled:
                 best, venue = min((p_a, "phemex"), (bin_a, "binance"))
             else:
                 best, venue = p_a, "phemex"
         else:
-            if bin_b is not None and not self.US_DEPLOYMENT:
+            if bin_b is not None and self.binance_enabled:
                 best, venue = max((p_b, "phemex"), (bin_b, "binance"))
             else:
                 best, venue = p_b, "phemex"
@@ -65,11 +83,11 @@ class TradeExecutor:
         try:
             if venue == "phemex":
                 return await self.api.create_limit_order(symbol, side, amount, best, {"timeInForce": "IOC"})
-            else:
+            elif venue == "binance" and self.binance_enabled:
                 return await self.binance.create_order(symbol, "limit", side, amount, best, {"timeInForce": "IOC"})
         except Exception as e:
             logging.error(f"[ROUTER] Order placement failed for {symbol} on {venue}: {e}")
-            return None
+        return None
 
     async def enter(self, symbol, side, amount, tp, sl):
         logging.info(f"[EXEC] ENTRY {side.upper()} {symbol} qty={amount:.6f}")
@@ -108,7 +126,7 @@ class TradeExecutor:
         try:
             if exchange_name == "phemex":
                 await self.api.exchange.create_order(symbol, "market", side, amount)
-            elif exchange_name == "binance" and self.binance:
+            elif exchange_name == "binance" and self.binance_enabled:
                 await self.binance.create_order(symbol, "market", side, amount)
             else:
                 logging.warning(f"[EXEC] Market order skipped — exchange '{exchange_name}' unavailable.")
