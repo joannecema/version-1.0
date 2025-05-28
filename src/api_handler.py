@@ -149,7 +149,6 @@ class ApiHandler:
                 amt = round(float(amount), prec_amt)
                 prc = round(float(price), prec_prc)
 
-                # Sanitize and convert params
                 clean_params = {}
                 for k, v in (params or {}).items():
                     if isinstance(v, float):
@@ -180,6 +179,29 @@ class ApiHandler:
         except Exception as e:
             logger.error(f"[API] Failed to place market order for {symbol}: {e}")
             return None
+
+    @retry
+    async def fetch_open_orders(self, symbol=None):
+        try:
+            async with self.throttle:
+                orders = await self.exchange.fetch_open_orders(symbol) if symbol else await self.exchange.fetch_open_orders()
+                logger.debug(f"[ORDERS] Retrieved {len(orders)} open orders for {symbol or 'ALL'}")
+                return orders
+        except Exception as e:
+            logger.error(f"[API] Failed to fetch open orders for {symbol or 'ALL'}: {e}")
+            return []
+
+    async def log_open_orders(self, symbol=None):
+        orders = await self.fetch_open_orders(symbol)
+        if not orders:
+            logger.info(f"[ORDERS] No open orders for {symbol or 'ALL'}")
+        else:
+            for order in orders:
+                logger.info(
+                    f"[ORDERS] Open → ID={order.get('id')} SYMBOL={order.get('symbol')} "
+                    f"SIDE={order.get('side')} PRICE={order.get('price')} AMOUNT={order.get('amount')} "
+                    f"STATUS={order.get('status')} CREATED={order.get('datetime')}"
+                )
 
     async def close(self):
         try:
