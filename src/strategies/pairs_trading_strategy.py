@@ -71,3 +71,4 @@ class PairsTradingStrategy:
 
             except Exception as e:
                 self.logger.error(f"[PAIRS] ❌ Error processing {sym_a}/{sym_b}: {e}")
+                
