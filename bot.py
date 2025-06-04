@@ -4,12 +4,13 @@ import asyncio
 import logging
 import signal
 import contextlib
+import logging.handlers
 from aiohttp import web
 from datetime import datetime
 
 from src.api_handler import ApiHandler
 from src.position_tracker import PositionTracker
-from src.trade_executor import AsyncTradeExecutor
+from src.trade_executor import AsyncTradeExecutor  # Updated import
 from src.strategy_manager import StrategyManager
 from src.volatility_regime_filter import VolatilityRegimeFilter
 
@@ -152,8 +153,8 @@ async def main():
     
     # Initialize core components
     tracker = PositionTracker(config, api)
-    executor = AsyncTradeExecutor(api, config)
-    await executor.start()
+    executor = AsyncTradeExecutor(api, config)  # Updated class
+    await executor.start()  # Start async executor
     
     strategy_manager = StrategyManager(config, api, tracker, executor)
     volatility_filter = VolatilityRegimeFilter(api, config)
