@@ -12,8 +12,8 @@ class EmaRsiStrategy:
 
         self.timeframe = config.get("timeframe", "1m")
         self.lookback = config.get("lookback", 50)
-        self.ema_short_period = config.get("ema_short", 12)  # ✅ fixed key
-        self.ema_long_period = config.get("ema_long", 26)    # ✅ fixed key
+        self.ema_short_period = config.get("ema_short", 12)
+        self.ema_long_period = config.get("ema_long", 26)
         self.rsi_period = config.get("rsi_period", 14)
         self.rsi_oversold = config.get("rsi_oversold", 30)
         self.rsi_overbought = config.get("rsi_overbought", 70)
