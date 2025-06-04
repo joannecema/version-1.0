@@ -82,7 +82,9 @@ async def main():
     setup_logging(cfg["log_file"])
     logging.info("🚀 HFT bot starting…")
 
-    api = ApiHandler(os.getenv("API_KEY"), os.getenv("API_SECRET"), cfg)
+    api_key = os.getenv("API_KEY")
+    api_secret = os.getenv("API_SECRET")
+    api = ApiHandler(api_key, api_secret, cfg)
     await api.exchange.load_markets()
 
     tracker = PositionTracker(cfg, api)
@@ -114,16 +116,16 @@ async def main():
             continue
 
         await manager.execute()
+        await tracker.evaluate_open_positions()
         cycle += 1
 
         if cycle % cfg["report_interval_cycles"] == 0:
             df = pd.DataFrame(tracker.trade_history)
             wins = len(df[df["pnl"] > 0])
             tot = len(df)
+            roi = (tracker.equity / tracker.config.get("initial_equity", 900) - 1) * 100
             logging.info(
-                f"📊 Equity: ${tracker.config.get('initial_equity', 900):.2f} | "
-                f"ROI: {(tracker.equity/900 - 1) * 100:.1f}% | "
-                f"Trades: {tot} | Wins: {wins}"
+                f"📊 Equity: ${tracker.equity:.2f} | ROI: {roi:.1f}% | Trades: {tot} | Wins: {wins}"
             )
 
         if tracker.trade_history and tracker.trade_history[-1]["pnl"] < 0:
