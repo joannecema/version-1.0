@@ -34,7 +34,7 @@ def retry(fn):
 
 
 class ApiHandler:
-    def __init__(self, api_key: str, api_secret: str, cfg: dict):
+    def __init__(self, api_key: str, api_secret: str, cfg: Optional[dict] = None):
         """
         Merged ApiHandler combining enhanced REST methods (ccxt.async_support) with
         ccxt.pro websocket capabilities. Handles:
@@ -43,11 +43,14 @@ class ApiHandler:
           • price precision scaling
           • robust OHLCV fetching
           • synchronous wrappers for trade_executor
+
+        Now `cfg` is optional; if not provided, an empty dict is used.
         """
-        self.cfg = cfg
-        self.disable_ws = cfg.get("disable_ws", False)
-        self.testnet = cfg.get("testnet", False)
-        self.throttle = asyncio.Semaphore(cfg.get("max_concurrent_requests", 3))
+        # If cfg is None, use an empty dict to avoid missing .get(...) calls
+        self.cfg = cfg or {}
+        self.disable_ws = self.cfg.get("disable_ws", False)
+        self.testnet = self.cfg.get("testnet", False)
+        self.throttle = asyncio.Semaphore(self.cfg.get("max_concurrent_requests", 3))
 
         # REST client for robust order creation and OHLCV
         self.rest_exchange = self._init_rest_exchange(api_key, api_secret)
