@@ -47,9 +47,12 @@ def setup_logging(log_file):
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
     fmt = logging.Formatter("[%(asctime)s] %(levelname)s %(message)s", "%Y-%m-%d %H:%M:%S")
-    ch = logging.StreamHandler(); ch.setFormatter(fmt)
-    fh = logging.FileHandler(log_file); fh.setFormatter(fmt)
-    logger.addHandler(ch); logger.addHandler(fh)
+    ch = logging.StreamHandler()
+    ch.setFormatter(fmt)
+    fh = logging.FileHandler(log_file)
+    fh.setFormatter(fmt)
+    logger.addHandler(ch)
+    logger.addHandler(fh)
 
 
 async def health(request):
@@ -65,7 +68,7 @@ async def shutdown(api):
 async def start_http(app, cfg):
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', cfg["health_port"])
+    site = web.TCPSite(runner, "0.0.0.0", cfg["health_port"])
     await site.start()
 
 
@@ -84,8 +87,10 @@ async def main():
 
     api_key = os.getenv("API_KEY")
     api_secret = os.getenv("API_SECRET")
-    api = ApiHandler(api_key, api_secret, cfg)
-    await api.exchange.load_markets()
+
+    # FIX: ApiHandler only expects (api_key, api_secret)
+    api = ApiHandler(api_key, api_secret)
+    await api.load_markets()
 
     try:
         symbols = cfg.get("symbols", [])
@@ -101,7 +106,7 @@ async def main():
 
     app = web.Application()
     app["tracker"] = tracker
-    app.router.add_get('/health', health)
+    app.router.add_get("/health", health)
     asyncio.create_task(start_http(app, cfg))
 
     loop = asyncio.get_event_loop()
@@ -124,21 +129,27 @@ async def main():
                     continue
 
                 logging.info(f"[CYCLE] Executing strategies for {symbol}")
-                await manager.execute()  # FIX 1: Removed passing `symbol` to execute()
+                # FIX: StrategyManager.execute() no longer takes a symbol argument
+                await manager.execute()
 
                 await tracker.evaluate_open_positions()
 
             cycle += 1
 
             if cycle % cfg["report_interval_cycles"] == 0:
-                df = pd.DataFrame(tracker.trade_history)
-                wins = len(df[df["pnl"] > 0])
-                tot = len(df)
-                roi = (tracker.equity / tracker.config.get("initial_equity", 900) - 1) * 100
+                if tracker.trade_history:
+                    df = pd.DataFrame(tracker.trade_history)
+                    wins = len(df[df["pnl"] > 0])
+                    tot = len(df)
+                else:
+                    wins = tot = 0
+                initial = tracker.config.get("initial_equity", 900)
+                roi = (tracker.equity / initial - 1) * 100
                 logging.info(
                     f"📊 Equity: ${tracker.equity:.2f} | ROI: {roi:.1f}% | Trades: {tot} | Wins: {wins}"
                 )
 
+            # Track consecutive losses
             if tracker.trade_history and tracker.trade_history[-1]["pnl"] < 0:
                 consecutive_losses += 1
             else:
@@ -147,7 +158,7 @@ async def main():
             await asyncio.sleep(cfg["execution_interval_sec"])
 
     finally:
-        await api.close()  # FIX 3: Ensure Phemex API is closed properly on exit
+        await api.close()  # Ensure Phemex API is closed properly on exit
 
 
 if __name__ == "__main__":
