@@ -85,14 +85,18 @@ async def main():
     api_key = os.getenv("API_KEY")
     api_secret = os.getenv("API_SECRET")
     api = ApiHandler(api_key, api_secret, cfg)
-    await api.load_markets()
+    await api.exchange.load_markets()
+
+    try:
+        symbols = cfg.get("symbols", [])
+        if not symbols:
+            raise ValueError("No symbols configured")
+        cfg["symbols"] = symbols
+    except Exception as e:
+        logging.error(f"[API] ❌ Failed to fetch top symbols: {e}")
+        return
 
     tracker = PositionTracker(cfg, api)
-    if not hasattr(tracker, "trade_history"):
-        tracker.trade_history = []
-    if not hasattr(tracker, "equity"):
-        tracker.equity = cfg.get("initial_equity", 900)
-
     executor = TradeExecutor(api, tracker, cfg)
     manager = StrategyManager(cfg, api, tracker, executor)
     vrf = VolatilityRegimeFilter(api, cfg)
@@ -115,24 +119,20 @@ async def main():
             await asyncio.sleep(cfg["pause_seconds_on_break"])
             consecutive_losses = 0
 
-        symbols = await api.get_top_symbols(limit=cfg["symbols_count"])
+        if not await vrf.allow_trading("BTC/USDT"):
+            logging.info("🚫 High volatility – skipping cycle")
+            await asyncio.sleep(cfg["execution_interval_sec"])
+            continue
 
-        for symbol in symbols:
-            if not await vrf.allow_trading(symbol):
-                logging.info(f"[SKIP] {symbol} blocked by volatility regime filter")
-                continue
-
-            logging.info(f"[CYCLE] Executing strategies for {symbol}")
-            await manager.execute(symbol)
-
+        await manager.execute()  # ✅ FIXED: Correct call without extra args
         await tracker.evaluate_open_positions()
         cycle += 1
 
         if cycle % cfg["report_interval_cycles"] == 0:
             df = pd.DataFrame(tracker.trade_history)
-            wins = len(df[df["pnl"] > 0]) if not df.empty else 0
+            wins = len(df[df["pnl"] > 0])
             tot = len(df)
-            roi = (tracker.equity / cfg.get("initial_equity", 900) - 1) * 100
+            roi = (tracker.equity / tracker.config.get("initial_equity", 900) - 1) * 100
             logging.info(
                 f"📊 Equity: ${tracker.equity:.2f} | ROI: {roi:.1f}% | Trades: {tot} | Wins: {wins}"
             )
@@ -144,6 +144,7 @@ async def main():
 
         await asyncio.sleep(cfg["execution_interval_sec"])
 
+    await api.close()  # ✅ FIXED: Clean shutdown
 
 if __name__ == "__main__":
     asyncio.run(main())
