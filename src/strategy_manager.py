@@ -39,13 +39,15 @@ class StrategyManager:
         for strategy_name in enabled:
             strategy = self.strategies.get(strategy_name)
             if not strategy:
-                log.warning(f"[STRATEGY] ❌ Strategy '{strategy_name}' not found or not initialized.")
+                log.warning(f"[STRATEGY] ❌ Strategy {strategy_name} not found in map.")
                 continue
+
+            log.info(f"[STRATEGY] 🧠 Running {strategy_name} strategy…")
 
             for symbol in symbols:
                 cooldown_key = f"{strategy_name}:{symbol}"
                 if self.cooldowns.get(cooldown_key, 0) > now:
-                    log.info(f"[STRATEGY] ⏳ Cooldown active for {cooldown_key}")
+                    log.debug(f"[STRATEGY] ⏳ Skipping {symbol} in {strategy_name} due to cooldown")
                     continue
 
                 try:
@@ -53,20 +55,19 @@ class StrategyManager:
                     if signal:
                         side, size = signal
 
-                        has_position = getattr(self.tracker, "has_open_position", lambda s: False)
-                        if has_position(symbol):
-                            log.info(f"[STRATEGY] 🔄 {symbol} already in open position — skipping {strategy_name}")
+                        if getattr(self.tracker, "has_open_position", lambda s: False)(symbol):
+                            log.info(f"[STRATEGY] 🔁 Skipped {symbol} — already in position for {strategy_name}")
                             continue
 
                         result = await self.executor.execute_order(symbol, side, size)
                         if result:
                             self.tracker.record_entry(symbol, side, size, result.get("price"))
+                            log.info(f"[STRATEGY] ✅ Executed {side.upper()} on {symbol} with size {size}")
                         else:
-                            log.warning(f"[STRATEGY] ⚠️ Order failed for {symbol} — applying cooldown")
-                            self.cooldowns[cooldown_key] = now + 60  # 1-minute cooldown
+                            log.warning(f"[STRATEGY] ⚠️ Order rejected for {symbol} in {strategy_name}")
+                            self.cooldowns[cooldown_key] = now + 60
                     else:
-                        log.debug(f"[STRATEGY] ❌ No signal for {symbol} under {strategy_name}")
-
+                        log.debug(f"[STRATEGY] ❌ No signal for {symbol} in {strategy_name}")
                 except Exception as e:
-                    log.error(f"[STRATEGY] 💥 Error in {strategy_name} on {symbol}: {e}")
-                    self.cooldowns[cooldown_key] = now + 90  # 90s cooldown on error
+                    log.error(f"[STRATEGY] 💥 Exception in {strategy_name} for {symbol}: {e}")
+                    self.cooldowns[cooldown_key] = now + 90
