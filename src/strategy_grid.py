@@ -1,4 +1,6 @@
+# strategy_grid.py
 import logging
+import numpy as np
 from typing import Optional, Tuple
 
 log = logging.getLogger("GridStrategy")
@@ -9,61 +11,74 @@ class GridStrategy:
         self.config = config
         self.tracker = tracker
         self.executor = executor
-
+        self.price_scale = {}
+        
         self.timeframe = config.get("timeframe", "1m")
         self.lookback = int(config.get("mm_lookback", 10))
         self.threshold = float(config.get("mm_deviation_threshold", 0.002))
         self.strategy_name = "grid"
+        self.min_contract_size = config.get("min_contract_size", 1)
+        self.testnet = config.get("testnet", False)
+
+    async def _get_price_scale(self, symbol):
+        if symbol not in self.price_scale:
+            market = await self.api.load_market(symbol)
+            self.price_scale[symbol] = market['precision']['price']
+        return self.price_scale[symbol]
 
     async def check_signal(self, symbol: str) -> Optional[Tuple[str, float]]:
         try:
-            ohlcv = await self.api.fetch_ohlcv(symbol, timeframe=self.timeframe, limit=self.lookback + 1)
-            if not ohlcv or len(ohlcv) <= self.lookback:
-                log.warning(f"[{self.strategy_name.upper()}] ⚠️ Not enough OHLCV for {symbol} (have {len(ohlcv)})")
-                return None
-
-            closes = [c[4] for c in ohlcv[-self.lookback:] if isinstance(c[4], (float, int))]
-            if len(closes) < self.lookback:
-                log.warning(f"[{self.strategy_name.upper()}] ⚠️ Invalid close data for {symbol}")
-                return None
-
-            avg_price = sum(closes) / len(closes)
-
-            ticker = await self.api.get_ticker(symbol)
-            if not ticker:
-                log.warning(f"[{self.strategy_name.upper()}] ⚠️ Missing ticker data for {symbol}")
-                return None
-
-            bid = ticker.get("bid")
-            ask = ticker.get("ask")
-            if not bid or not ask or bid <= 0 or ask <= 0:
-                log.warning(f"[{self.strategy_name.upper()}] ⚠️ Invalid bid/ask for {symbol}: bid={bid}, ask={ask}")
-                return None
-
-            mid_price = (bid + ask) / 2
-            spread = ask - bid
-            log.debug(f"[{self.strategy_name.upper()}] {symbol} avg={avg_price:.4f} mid={mid_price:.4f} spread={spread:.5f}")
-
             if await self.tracker.has_open_position(symbol):
-                log.info(f"[{self.strategy_name.upper()}] 🔄 Skipping {symbol} — already in open position")
+                return None
+                
+            # Get OHLCV and ticker in parallel
+            ohlcv_future = self.api.fetch_ohlcv_with_retry(
+                symbol, 
+                self.timeframe, 
+                limit=self.lookback + 1,
+                max_retries=3
+            )
+            ticker_future = self.api.fetch_ticker_with_retry(symbol, max_retries=3)
+            
+            ohlcv, ticker = await asyncio.gather(ohlcv_future, ticker_future)
+            
+            if not ohlcv or not ticker:
                 return None
 
-            capital = await self.tracker.get_available_usdt()
-            size = self.executor._calculate_trade_size(capital, mid_price)
-            if size <= 0:
-                log.warning(f"[{self.strategy_name.upper()}] ⚠️ Skipping {symbol}, invalid trade size")
+            # Calculate average price
+            closes = np.array([c[4] for c in ohlcv[-self.lookback:]], dtype=float)
+            avg_price = np.mean(closes)
+            
+            # Get current prices
+            bid = float(ticker.get("bid", 0))
+            ask = float(ticker.get("ask", 0))
+            if bid <= 0 or ask <= 0:
+                return None
+                
+            mid_price = (bid + ask) / 2
+            price_scale = await self._get_price_scale(symbol)
+            size = await self.executor.calculate_risk_adjusted_size(
+                symbol, 
+                mid_price,
+                price_scale
+            )
+            
+            if size < self.min_contract_size:
                 return None
 
+            # Grid signals
             if mid_price < avg_price * (1 - self.threshold):
-                log.info(f"[{self.strategy_name.upper()}] ✅ BUY signal on {symbol} @ {mid_price:.4f}")
-                return "buy", size
+                log.info("[%s] BUY %s @ %.4f (Below avg: %.4f)", 
+                         self.strategy_name.upper(), symbol, mid_price, avg_price)
+                return ("buy", size)
             elif mid_price > avg_price * (1 + self.threshold):
-                log.info(f"[{self.strategy_name.upper()}] ✅ SELL signal on {symbol} @ {mid_price:.4f}")
-                return "sell", size
-
-            log.debug(f"[{self.strategy_name.upper()}] ❌ No action on {symbol} — within threshold")
-            return None
-
+                log.info("[%s] SELL %s @ %.4f (Above avg: %.4f)", 
+                         self.strategy_name.upper(), symbol, mid_price, avg_price)
+                return ("sell", size)
+                
+        except self.api.RateLimitExceeded:
+            log.warning("[%s] Rate limit exceeded for %s", self.strategy_name.upper(), symbol)
+            await asyncio.sleep(10)
         except Exception as e:
-            log.error(f"[{self.strategy_name.upper()}] ❌ Exception for {symbol}: {e}")
-            return None
+            log.exception("[%s] Error for %s: %s", self.strategy_name.upper(), symbol, e)
+        return None
