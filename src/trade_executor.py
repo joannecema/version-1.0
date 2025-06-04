@@ -95,7 +95,7 @@ class PhemexTradeExecutor(TradeExecutor):
             )
             return True
 
-    @exponential_backoff(retries=3, base_delay=1.0)
+    @exponential_backoff(retries=3, delay=1.0)
     def execute_order(self, order: Order) -> bool:
         """
         Attempts to place an order on Phemex.
@@ -197,7 +197,9 @@ class PhemexTradeExecutor(TradeExecutor):
                         try:
                             self.api.cancel_order(order.symbol, order_id)
                         except Exception as e:
-                            self.logger.warning(f"[EXECUTOR] Could not cancel stale order {order_id}: {e}")
+                            self.logger.warning(
+                                f"[EXECUTOR] Could not cancel stale order {order_id}: {e}"
+                            )
 
                         remaining_qty = order.quantity - order.filled_quantity
                         if remaining_qty > 0:
