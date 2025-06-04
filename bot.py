@@ -8,7 +8,7 @@ from aiohttp import web
 
 from src.api_handler import ApiHandler
 from src.position_tracker import PositionTracker
-from src.trade_executor import TradeExecutor
+from src.trade_executor import PhemexTradeExecutor
 from src.strategy_manager import StrategyManager
 from src.volatility_regime_filter import VolatilityRegimeFilter
 
@@ -88,7 +88,7 @@ async def main():
     api_key = os.getenv("API_KEY")
     api_secret = os.getenv("API_SECRET")
 
-    # FIX: ApiHandler only expects (api_key, api_secret)
+    # ApiHandler now takes only (api_key, api_secret)
     api = ApiHandler(api_key, api_secret)
     await api.load_markets()
 
@@ -100,7 +100,7 @@ async def main():
         cfg["symbols"] = ["BTC/USDT"]
 
     tracker = PositionTracker(cfg, api)
-    executor = TradeExecutor(api, tracker, cfg)
+    executor = PhemexTradeExecutor(api, tracker, cfg)
     manager = StrategyManager(cfg, api, tracker, executor)
     vrf = VolatilityRegimeFilter(api, cfg)
 
@@ -129,7 +129,7 @@ async def main():
                     continue
 
                 logging.info(f"[CYCLE] Executing strategies for {symbol}")
-                # FIX: StrategyManager.execute() no longer takes a symbol argument
+                # StrategyManager.execute() no longer takes a symbol argument
                 await manager.execute()
 
                 await tracker.evaluate_open_positions()
