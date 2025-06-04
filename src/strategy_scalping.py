@@ -51,8 +51,14 @@ class ScalpingStrategy:
             return None
 
         side = "buy" if percent_change > 0 else "sell"
-        capital = self.tracker.get_available_capital()
-        size = self.executor.calculate_order_size(symbol, capital)
+
+        try:
+            capital = await self.tracker.get_available_usdt()
+            current_price = close_prices[-1]
+            size = self.executor._calculate_trade_size(capital, current_price)
+        except Exception as e:
+            log.error(f"[SCALPING] ❌ Failed to calculate trade size for {symbol}: {e}")
+            return None
 
         log.info(f"[SCALPING] ✅ Signal confirmed: {symbol} | side={side.upper()} | Δ={percent_change:.4f} | size={size}")
         return side, size
