@@ -11,11 +11,14 @@ class StrategyManager:
         self.executor = executor
         self.cooldowns = {}
 
-        # Strategy class mapping (ensure these are imported properly)
-        from src.strategy_scalping import ScalpingStrategy
-        from src.strategy_breakout import BreakoutStrategy
-        from src.strategy_ema_rsi import EmaRsiStrategy
-        from src.strategy_grid import GridStrategy
+        try:
+            from src.strategy_scalping import ScalpingStrategy
+            from src.strategy_breakout import BreakoutStrategy
+            from src.strategy_ema_rsi import EmaRsiStrategy
+            from src.strategy_grid import GridStrategy
+        except ImportError as e:
+            log.error(f"[STRATEGY] ❌ Failed to import one or more strategies: {e}")
+            raise
 
         self.strategies = {
             "scalping": ScalpingStrategy(api, config, tracker, executor),
@@ -28,6 +31,8 @@ class StrategyManager:
         enabled = self.config.get("strategy_stack", [])
         symbols = self.config.get("symbols", [])
 
+        now = asyncio.get_event_loop().time()
+
         for strategy_name in enabled:
             strategy = self.strategies.get(strategy_name)
             if not strategy:
@@ -36,7 +41,7 @@ class StrategyManager:
 
             for symbol in symbols:
                 cooldown_key = f"{strategy_name}:{symbol}"
-                if self.cooldowns.get(cooldown_key, 0) > asyncio.get_event_loop().time():
+                if self.cooldowns.get(cooldown_key, 0) > now:
                     log.info(f"[STRATEGY] ⏳ Cooldown active for {cooldown_key}")
                     continue
 
@@ -44,17 +49,21 @@ class StrategyManager:
                     signal = await strategy.check_signal(symbol)
                     if signal:
                         side, size = signal
-                        if self.tracker.has_open_position(symbol):
+
+                        # Fallback check for position if method isn't present
+                        has_position = getattr(self.tracker, "has_open_position", lambda sym: False)(symbol)
+                        if has_position:
                             log.info(f"[STRATEGY] 🔄 {symbol} already in open position — skipping {strategy_name}")
                             continue
+
                         result = await self.executor.execute_order(symbol, side, size)
                         if result:
                             self.tracker.record_entry(symbol, side, size, result['price'])
                         else:
                             log.warning(f"[STRATEGY] ⚠️ Order rejected or failed for {symbol}")
-                            self.cooldowns[cooldown_key] = asyncio.get_event_loop().time() + 60  # 1-min cooldown
+                            self.cooldowns[cooldown_key] = now + 60  # 1-min cooldown
                     else:
                         log.debug(f"[STRATEGY] ❌ No signal for {symbol} in {strategy_name}")
                 except Exception as e:
                     log.error(f"[STRATEGY] 💥 Error in {strategy_name} on {symbol}: {e}")
-                    self.cooldowns[cooldown_key] = asyncio.get_event_loop().time() + 90  # backoff on error
+                    self.cooldowns[cooldown_key] = now + 90  # backoff on error
