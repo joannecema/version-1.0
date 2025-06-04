@@ -27,43 +27,45 @@ class StrategyManager:
             "grid": GridStrategy(api, config, tracker, executor)
         }
 
-    async def execute(self):
-        enabled = self.config.get("strategy_stack", [])
-        symbols = self.config.get("symbols", [])
-
+    async def execute(self, symbol: str):
+        enabled_strategies = self.config.get("strategy_stack", [])
         now = asyncio.get_event_loop().time()
 
-        for strategy_name in enabled:
+        for strategy_name in enabled_strategies:
             strategy = self.strategies.get(strategy_name)
             if not strategy:
-                log.warning(f"[STRATEGY] ❌ Strategy {strategy_name} not recognized.")
+                log.warning(f"[STRATEGY] ❌ Strategy {strategy_name} not recognized — skipping.")
                 continue
 
-            for symbol in symbols:
-                cooldown_key = f"{strategy_name}:{symbol}"
-                if self.cooldowns.get(cooldown_key, 0) > now:
-                    log.info(f"[STRATEGY] ⏳ Cooldown active for {cooldown_key}")
+            cooldown_key = f"{strategy_name}:{symbol}"
+            if self.cooldowns.get(cooldown_key, 0) > now:
+                log.info(f"[STRATEGY] ⏳ Cooldown active for {cooldown_key}")
+                continue
+
+            try:
+                signal = await strategy.check_signal(symbol)
+                if not signal:
+                    log.debug(f"[STRATEGY] ❌ No signal for {symbol} in {strategy_name}")
                     continue
 
-                try:
-                    signal = await strategy.check_signal(symbol)
-                    if signal:
-                        side, size = signal
+                side, size = signal
 
-                        # Fallback check for position if method isn't present
-                        has_position = getattr(self.tracker, "has_open_position", lambda sym: False)(symbol)
-                        if has_position:
-                            log.info(f"[STRATEGY] 🔄 {symbol} already in open position — skipping {strategy_name}")
-                            continue
+                # Check if symbol already has open position
+                has_position = False
+                if hasattr(self.tracker, "has_open_position"):
+                    has_position = self.tracker.has_open_position(symbol)
 
-                        result = await self.executor.execute_order(symbol, side, size)
-                        if result:
-                            self.tracker.record_entry(symbol, side, size, result['price'])
-                        else:
-                            log.warning(f"[STRATEGY] ⚠️ Order rejected or failed for {symbol}")
-                            self.cooldowns[cooldown_key] = now + 60  # 1-min cooldown
-                    else:
-                        log.debug(f"[STRATEGY] ❌ No signal for {symbol} in {strategy_name}")
-                except Exception as e:
-                    log.error(f"[STRATEGY] 💥 Error in {strategy_name} on {symbol}: {e}")
-                    self.cooldowns[cooldown_key] = now + 90  # backoff on error
+                if has_position:
+                    log.info(f"[STRATEGY] 🔄 {symbol} already in open position — skipping {strategy_name}")
+                    continue
+
+                result = await self.executor.execute_order(symbol, side, size)
+                if result:
+                    self.tracker.record_entry(symbol, side, size, result.get("price"))
+                else:
+                    log.warning(f"[STRATEGY] ⚠️ Order failed or rejected for {symbol} in {strategy_name}")
+                    self.cooldowns[cooldown_key] = now + 60  # Retry cooldown
+
+            except Exception as e:
+                log.error(f"[STRATEGY] 💥 Error in {strategy_name} on {symbol}: {e}")
+                self.cooldowns[cooldown_key] = now + 90  # Backoff cooldown
