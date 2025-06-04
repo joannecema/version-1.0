@@ -1,5 +1,3 @@
-# src/strategy_ema_rsi.py
-
 import logging
 from typing import Optional, Tuple
 
@@ -22,7 +20,7 @@ class EmaRsiStrategy:
 
     async def check_signal(self, symbol: str) -> Optional[Tuple[str, float]]:
         try:
-            ohlcv = await self.api.get_ohlcv(symbol, self.timeframe, self.lookback + 1)
+            ohlcv = await self.api.fetch_ohlcv(symbol, self.timeframe, limit=self.lookback + 1)
         except Exception as e:
             log.error(f"[EMA-RSI] ❌ Failed to fetch OHLCV for {symbol}: {e}")
             return None
@@ -36,11 +34,10 @@ class EmaRsiStrategy:
             log.warning(f"[EMA-RSI] ⚠️ Not enough close data for {symbol}")
             return None
 
-        # EMA calculation
-        def ema(series, period):
+        def ema(data, period):
             k = 2 / (period + 1)
-            ema_val = series[0]
-            for price in series[1:]:
+            ema_val = data[0]
+            for price in data[1:]:
                 ema_val = price * k + ema_val * (1 - k)
             return ema_val
 
@@ -48,14 +45,14 @@ class EmaRsiStrategy:
         ema_long = ema(closes[-self.ema_long_period:], self.ema_long_period)
 
         # RSI calculation
-        gains = []
-        losses = []
+        gains, losses = [], []
         for i in range(1, self.rsi_period + 1):
             diff = closes[-i] - closes[-i - 1]
             if diff >= 0:
                 gains.append(diff)
             else:
                 losses.append(abs(diff))
+
         avg_gain = sum(gains) / self.rsi_period if gains else 0.0001
         avg_loss = sum(losses) / self.rsi_period if losses else 0.0001
         rs = avg_gain / avg_loss
@@ -63,16 +60,19 @@ class EmaRsiStrategy:
 
         log.debug(f"[EMA-RSI] {symbol} EMA_S={ema_short:.4f}, EMA_L={ema_long:.4f}, RSI={rsi:.2f}")
 
-        capital = await self.tracker.get_available_usdt()
-        price = closes[-1]
-        size = self.executor._calculate_trade_size(capital, price)
+        try:
+            capital = await self.tracker.get_available_usdt()
+            price = closes[-1]
+            size = self.executor._calculate_trade_size(capital, price)
+        except Exception as e:
+            log.error(f"[EMA-RSI] ❌ Trade sizing failed for {symbol}: {e}")
+            return None
 
-        # Entry Conditions
         if ema_short > ema_long and rsi < self.rsi_oversold:
-            log.info(f"[EMA-RSI] ✅ BUY signal {symbol} | EMA crossover + RSI={rsi:.2f}")
+            log.info(f"[EMA-RSI] ✅ BUY signal {symbol} | EMA↑ & RSI={rsi:.2f}")
             return "buy", size
         elif ema_short < ema_long and rsi > self.rsi_overbought:
-            log.info(f"[EMA-RSI] ✅ SELL signal {symbol} | EMA cross down + RSI={rsi:.2f}")
+            log.info(f"[EMA-RSI] ✅ SELL signal {symbol} | EMA↓ & RSI={rsi:.2f}")
             return "sell", size
 
         log.debug(f"[EMA-RSI] ❌ No signal on {symbol}")
