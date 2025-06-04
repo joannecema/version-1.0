@@ -28,9 +28,9 @@
   "health_port": 8000,
   "metrics_port": 8001,
   "dynamic_universe": true,
-  "pairs": [
-    ["BTC/USDT", "ETH/USDT"],
-    ["SOL/USDT", "XRP/USDT"]  // Fixed: Replaced ADA/USDT with XRP/USDT (exists in symbols)
+  "pairs": [                            // LINE 33 FIX
+    ["BTC/USDT", "ETH/USDT"],           // Comma was missing here
+    ["SOL/USDT", "XRP/USDT"]            // Fixed pair symbol
   ],
   "market_make_spread_pct": 0.0002,
   "market_make_size_usdt": 5,
@@ -44,21 +44,19 @@
   "max_consecutive_losses": 5,
   "pause_seconds_on_break": 300,
   "leverage": 1.5,
-  "use_fix_md": false,  // Changed to false - Binance doesn't support FIX
-  "disable_ws": false,   // Changed to false - WebSockets recommended
-  "enable_binance": true,  // Changed to true to enable Binance
+  "use_fix_md": false,
+  "disable_ws": false,
+  "enable_binance": true,
   "ml_model_path": null,
   "log_file": "trading_bot.log",
   "trade_history_file": "trade_history.csv",
   "report_interval_cycles": 3600,
   "zscore_entry": 1.5,
   "zscore_exit": 0.5,
-  
-  // CRITICAL ADDITIONS (Missing API credentials)
   "exchange": {
     "name": "binance",
-    "api_key": "YOUR_API_KEY_HERE",        // Replace with your actual key
-    "api_secret": "YOUR_API_SECRET_HERE",  // Replace with your actual secret
-    "testnet": true  // Recommended for initial testing
+    "api_key": "YOUR_API_KEY_HERE",
+    "api_secret": "YOUR_API_SECRET_HERE",
+    "testnet": true
   }
 }
