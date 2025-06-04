@@ -15,18 +15,28 @@ def get_logger(name: str) -> logging.Logger:
         logger.setLevel(logging.INFO)
     return logger
 
-def exponential_backoff(retries: int = 3, base_delay: float = 1.0):
+def exponential_backoff(retries: int = 3, delay: float = 1.0, max_delay: float = 10.0):
+    """
+    Retry a coroutine function with exponential backoff.
+    - retries: number of attempts
+    - delay: initial delay in seconds
+    - max_delay: maximum delay between attempts
+    """
     def decorator(func: Callable):
         @wraps(func)
         async def wrapper(*args, **kwargs) -> Any:
-            for attempt in range(retries):
+            attempt = 0
+            wait = delay
+            while attempt < retries:
                 try:
                     return await func(*args, **kwargs)
                 except Exception as e:
-                    delay = base_delay * (2 ** attempt)
-                    log.warning(f"[BACKOFF] {func.__name__} failed (attempt {attempt + 1}/{retries}): {e}")
-                    await asyncio.sleep(delay)
-            log.error(f"[BACKOFF] {func.__name__} failed after {retries} retries.")
-            return None
+                    attempt += 1
+                    log.warning(f"[BACKOFF] {func.__name__} failed (attempt {attempt}/{retries}): {e}")
+                    if attempt >= retries:
+                        log.error(f"[BACKOFF] {func.__name__} failed after {retries} retries.")
+                        raise
+                    await asyncio.sleep(min(wait, max_delay))
+                    wait *= 2
         return wrapper
     return decorator
