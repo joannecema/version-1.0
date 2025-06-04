@@ -69,10 +69,10 @@ class EmaRsiStrategy:
             return None
 
         if ema_short > ema_long and rsi < self.rsi_oversold:
-            log.info(f"[EMA-RSI] ✅ BUY signal {symbol} | EMA↑ & RSI={rsi:.2f}")
+            log.info(f"[EMA-RSI] ✅ BUY signal {symbol} | EMA↑ & RSI={rsi:.2f} | size={size}")
             return "buy", size
         elif ema_short < ema_long and rsi > self.rsi_overbought:
-            log.info(f"[EMA-RSI] ✅ SELL signal {symbol} | EMA↓ & RSI={rsi:.2f}")
+            log.info(f"[EMA-RSI] ✅ SELL signal {symbol} | EMA↓ & RSI={rsi:.2f} | size={size}")
             return "sell", size
 
         log.debug(f"[EMA-RSI] ❌ No signal on {symbol}")
