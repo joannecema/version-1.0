@@ -1,7 +1,10 @@
+# src/trade_executor.py
+
 import logging
 from decimal import Decimal, ROUND_DOWN
 
 log = logging.getLogger("TradeExecutor")
+
 
 class TradeExecutor:
     def __init__(self, api, tracker, config):
@@ -16,7 +19,11 @@ class TradeExecutor:
                 log.warning(f"[EXECUTOR] ⚠️ Skipped LONG — No USDT balance for {symbol}")
                 return
 
-            price = entry_price or await self.tracker.get_price(symbol)
+            price = entry_price or await self._get_price(symbol)
+            if not price or price <= 0:
+                log.warning(f"[EXECUTOR] ⚠️ Skipped LONG — Invalid price for {symbol}")
+                return
+
             size = self._calculate_trade_size(usdt_balance, price)
             if size <= 0:
                 log.warning(f"[EXECUTOR] ⚠️ Skipped LONG — Invalid size for {symbol}")
@@ -31,14 +38,11 @@ class TradeExecutor:
         except Exception as e:
             log.error(f"[EXECUTOR] ❌ Exception during LONG for {symbol}: {e}")
 
-    async def enter_short(self, symbol, entry_price=None):
-        log.warning(f"[EXECUTOR] ⚠️ SHORT not implemented for SPOT market — skipping {symbol}")
-
     async def exit_position(self, symbol, exit_price=None):
         try:
             position = self.tracker.get_open_position(symbol)
             if not position:
-                log.info(f"[EXECUTOR] ⏹ No position to exit for {symbol}")
+                log.info(f"[EXECUTOR] ⏹ No open position to exit for {symbol}")
                 return
 
             side = "sell" if position["side"] == "long" else "buy"
@@ -51,10 +55,17 @@ class TradeExecutor:
         except Exception as e:
             log.error(f"[EXECUTOR] ❌ Exception during EXIT for {symbol}: {e}")
 
+    async def _get_price(self, symbol):
+        ticker = await self.api.get_ticker(symbol)
+        if ticker and "last" in ticker:
+            return float(ticker["last"])
+        else:
+            log.warning(f"[EXECUTOR] ⚠️ Price fetch failed for {symbol}")
+            return 0
+
     def _calculate_trade_size(self, usdt_balance, price):
         if not price or price <= 0:
             return 0
-
         try:
             percent = self.config.get("trade_allocation_pct", 0.1)
             capital = usdt_balance * percent
@@ -63,3 +74,6 @@ class TradeExecutor:
         except Exception as e:
             log.error(f"[EXECUTOR] ❌ Error calculating trade size: {e}")
             return 0
+
+    async def enter_short(self, symbol, entry_price=None):
+        log.warning(f"[EXECUTOR] ⚠️ SHORT not implemented for SPOT — skipping {symbol}")
