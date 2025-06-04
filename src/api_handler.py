@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time  # Imported the time module
 from typing import List, Optional
 import ccxt.async_support as ccxt
 from ccxt import NetworkError, ExchangeError, RequestTimeout
