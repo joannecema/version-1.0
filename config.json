@@ -28,9 +28,9 @@
   "health_port": 8000,
   "metrics_port": 8001,
   "dynamic_universe": true,
-  "pairs": [                            // LINE 31 FIX
+  "pairs": [                            
     ["BTC/USDT", "ETH/USDT"],
-    ["SOL/USDT", "XRP/USDT"]             // Removed trailing comma
+    ["SOL/USDT", "XRP/USDT"]            
   ],
   "market_make_spread_pct": 0.0002,
   "market_make_size_usdt": 5,
