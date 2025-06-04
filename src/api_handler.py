@@ -68,13 +68,13 @@ class ApiHandler:
             return symbol.replace("/", "")
 
     @retry
-    async def fetch_ohlcv(self, symbol, timeframe, since=None, limit=None, params=None):
+    async def fetch_ohlcv(self, symbol: str, timeframe: str = "1m", since=None, limit: int = 100, params=None):
         async with self.throttle:
             try:
                 market_id = self.get_market_id(symbol)
                 query = params.copy() if params else {}
                 query["to"] = int(time.time() * 1000)
-                return await self.exchange.fetch_ohlcv(market_id, timeframe, since, limit, query)
+                return await self.exchange.fetch_ohlcv(market_id, timeframe=timeframe, since=since, limit=limit, params=query)
             except Exception as e:
                 logger.error(f"[API] fetch_ohlcv failed for {symbol}: {e}")
                 return []
