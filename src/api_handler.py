@@ -46,7 +46,6 @@ class ApiHandler:
 
         Now `cfg` is optional; if not provided, an empty dict is used.
         """
-        # If cfg is None, use an empty dict to avoid missing .get(...) calls
         self.cfg = cfg or {}
         self.disable_ws = self.cfg.get("disable_ws", False)
         self.testnet = self.cfg.get("testnet", False)
@@ -98,8 +97,12 @@ class ApiHandler:
                     for symbol, market in self.ws_exchange.markets.items()
                     if market.get("spot", True)
                 }
+
                 for symbol, market in self.ws_exchange.markets.items():
-                    prec = market.get("precision", {}).get("price", 2)
+                    # Attempt to read price precision; if it's None or missing, default to 2
+                    prec = market.get("precision", {}).get("price")
+                    if prec is None:
+                        prec = 2
                     self.price_scales[symbol] = 10 ** prec
 
                 self.last_market_load = now
