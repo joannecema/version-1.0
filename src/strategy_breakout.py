@@ -1,5 +1,3 @@
-# src/strategy_breakout.py
-
 import logging
 from typing import Optional, Tuple
 
@@ -19,13 +17,13 @@ class BreakoutStrategy:
 
     async def check_signal(self, symbol: str) -> Optional[Tuple[str, float]]:
         try:
-            ohlcv = await self.api.get_ohlcv(symbol, self.timeframe, self.lookback + 1)
+            ohlcv = await self.api.fetch_ohlcv(symbol, self.timeframe, limit=self.lookback + 1)
         except Exception as e:
             log.error(f"[BREAKOUT] ❌ Failed to fetch OHLCV for {symbol}: {e}")
             return None
 
         if not ohlcv or len(ohlcv) < self.lookback + 1:
-            log.warning(f"[BREAKOUT] ⚠️ Not enough OHLCV for {symbol}")
+            log.warning(f"[BREAKOUT] ⚠️ Not enough OHLCV for {symbol} (got {len(ohlcv)})")
             return None
 
         highs = [c[2] for c in ohlcv[:-1]]
@@ -44,11 +42,15 @@ class BreakoutStrategy:
 
         # Volume confirmation
         if current_volume < avg_volume * self.volume_multiplier:
-            log.debug(f"[BREAKOUT] Volume not sufficient on {symbol}: {current_volume:.2f} < {avg_volume:.2f}")
+            log.debug(f"[BREAKOUT] ❌ Volume not sufficient on {symbol}: {current_volume:.2f} < {avg_volume:.2f}")
             return None
 
-        capital = await self.tracker.get_available_usdt()
-        size = self.executor._calculate_trade_size(capital, current_close)
+        try:
+            capital = await self.tracker.get_available_usdt()
+            size = self.executor._calculate_trade_size(capital, current_close)
+        except Exception as e:
+            log.error(f"[BREAKOUT] ❌ Failed to calculate trade size for {symbol}: {e}")
+            return None
 
         if current_high > max_high:
             log.info(f"[BREAKOUT] ✅ BREAKOUT UP on {symbol} | {current_high:.4f} > {max_high:.4f}")
@@ -57,5 +59,5 @@ class BreakoutStrategy:
             log.info(f"[BREAKOUT] ✅ BREAKOUT DOWN on {symbol} | {current_low:.4f} < {min_low:.4f}")
             return "sell", size
 
-        log.debug(f"[BREAKOUT] ❌ No breakout on {symbol} | Price={current_close:.4f}")
+        log.debug(f"[BREAKOUT] ❌ No breakout on {symbol} | Close={current_close:.4f}")
         return None
