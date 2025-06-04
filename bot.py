@@ -10,7 +10,7 @@ from src.api_handler import ApiHandler
 from src.position_tracker import PositionTracker
 from src.trade_executor import TradeExecutor
 from src.strategy_manager import StrategyManager
-from src.strategies.volatility_regime_filter import VolatilityRegimeFilter
+from src.volatility_regime_filter import VolatilityRegimeFilter
 
 
 def validate_config(cfg):
@@ -85,11 +85,9 @@ async def main():
     api = ApiHandler(os.getenv("API_KEY"), os.getenv("API_SECRET"), cfg)
     await api.exchange.load_markets()
 
-    # ✅ Fixed constructor for PositionTracker with both cfg and api
     tracker = PositionTracker(cfg, api)
-
-    executor = TradeExecutor(api, tracker, cfg, md_queue=None)
-    manager = StrategyManager(api, tracker, executor, cfg)
+    executor = TradeExecutor(api, tracker, cfg)  # ✅ FIXED: Removed md_queue
+    manager = StrategyManager(cfg, api, tracker, executor)
     vrf = VolatilityRegimeFilter(api, cfg)
 
     app = web.Application()
@@ -115,7 +113,7 @@ async def main():
             await asyncio.sleep(cfg["execution_interval_sec"])
             continue
 
-        await manager.run_cycle()
+        await manager.execute()
         cycle += 1
 
         if cycle % cfg["report_interval_cycles"] == 0:
@@ -123,7 +121,7 @@ async def main():
             wins = len(df[df["pnl"] > 0])
             tot = len(df)
             logging.info(
-                f"Equity: ${tracker.equity:.2f} | "
+                f"Equity: ${tracker.config.get('initial_equity', 900):.2f} | "
                 f"ROI: {(tracker.equity/900 - 1) * 100:.1f}% | "
                 f"Trades: {tot} | Wins: {wins}"
             )
