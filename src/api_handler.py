@@ -19,7 +19,7 @@ class ApiHandler:
             }
         })
         self.markets = {}
-        self.symbol_map = {}  # Maps "BTC/USDT" → "BTCUSDT"
+        self.symbol_map = {}
 
     async def load_markets(self):
         try:
@@ -32,32 +32,37 @@ class ApiHandler:
             log.error(f"[API] ❌ Failed to load markets: {e}")
 
     def _is_valid_symbol(self, symbol: str) -> bool:
-        base, quote = symbol.split("/")
-        return quote.upper() in STABLECOINS and base.upper() not in STABLECOINS
+        try:
+            base, quote = symbol.split("/")
+            return (
+                quote.upper() in STABLECOINS and
+                base.upper() not in STABLECOINS and
+                not base.upper().endswith("DOWN") and
+                not base.upper().endswith("UP")
+            )
+        except Exception:
+            return False
 
-    async def get_top_symbols(self, count: int = 10, exclude_stable: bool = True) -> List[str]:
+    async def get_top_symbols(self, limit: int = 10) -> List[str]:
         try:
             if not self.markets:
                 await self.load_markets()
 
-            symbols = [s for s in self.markets if (not exclude_stable or self._is_valid_symbol(s))]
-            volumes = []
-
-            for symbol in symbols:
-                try:
-                    ticker = await self.exchange.fetch_ticker(symbol)
-                    volume = ticker.get("quoteVolume")
-                    if volume and isinstance(volume, (int, float)):
-                        volumes.append((symbol, volume))
-                except Exception:
-                    continue
-
-            sorted_volumes = sorted(volumes, key=lambda x: x[1], reverse=True)
-            top = [s for s, _ in sorted_volumes[:count]]
-
-            log.info(f"[API] 📈 Top {count} symbols: {top}")
-            return top if top else ["BTC/USDT"]
-
+            tickers = await self.exchange.fetch_tickers()
+            ranked = sorted(
+                [
+                    (s, t['quoteVolume'])
+                    for s, t in tickers.items()
+                    if s in self.markets
+                    and isinstance(t.get('quoteVolume'), (int, float))
+                    and self._is_valid_symbol(s)
+                ],
+                key=lambda x: x[1],
+                reverse=True
+            )
+            top_symbols = [s for s, _ in ranked[:limit]]
+            log.info(f"[API] 📈 Top {limit} trading symbols: {top_symbols}")
+            return top_symbols
         except Exception as e:
             log.error(f"[API] ❌ Failed to fetch top symbols: {e}")
             return ["BTC/USDT"]
@@ -65,15 +70,16 @@ class ApiHandler:
     async def get_balance(self, currency: str = "USDT") -> float:
         try:
             balance = await self.exchange.fetch_balance()
-            return balance.get(currency, {}).get("free", 0)
+            free_balance = balance.get(currency, {}).get('free', 0)
+            log.debug(f"[API] Free {currency} balance: {free_balance}")
+            return free_balance
         except Exception as e:
             log.error(f"[API] ❌ Failed to fetch balance: {e}")
             return 0
 
     async def fetch_ticker(self, symbol: str) -> Optional[float]:
         try:
-            ticker = await self.exchange.fetch_ticker(symbol)
-            return ticker.get("last")
+            return (await self.exchange.fetch_ticker(symbol)).get("last")
         except Exception as e:
             log.error(f"[API] ❌ Failed to fetch ticker for {symbol}: {e}")
             return None
@@ -82,6 +88,7 @@ class ApiHandler:
         for attempt in range(3):
             try:
                 if not self.markets or symbol not in self.symbol_map:
+                    log.debug(f"[API] Symbol {symbol} not in symbol_map — reloading markets")
                     await self.load_markets()
 
                 market_id = self.symbol_map.get(symbol)
@@ -98,16 +105,19 @@ class ApiHandler:
                     return []
 
                 since = self.exchange.milliseconds() - self.exchange.parse_timeframe(timeframe) * 1000 * limit
-                return await self.exchange.fetch_ohlcv(market_id, timeframe, since=since)
-
+                log.debug(f"[API] Fetching OHLCV: {symbol} → {market_id} | since={since}")
+                return await self.exchange.fetch_ohlcv(
+                    market_id,
+                    timeframe=timeframe,
+                    since=since
+                )
             except ccxt.RateLimitExceeded:
                 wait = (attempt + 1) * 2
-                log.warning(f"[API] ⏳ Rate limit hit for {symbol}, retrying in {wait}s...")
+                log.warning(f"[API] ⏳ Rate limit hit for {symbol}. Retrying in {wait}s...")
                 await asyncio.sleep(wait)
             except Exception as e:
                 log.error(f"[API] ❌ fetch_ohlcv failed for {symbol}: {e}")
                 await asyncio.sleep(1)
-
         return []
 
     async def get_ohlcv(self, symbol: str, timeframe: str = '1m', limit: int = 20) -> List[List[float]]:
@@ -123,8 +133,4 @@ class ApiHandler:
             return None
 
     async def close(self):
-        try:
-            await self.exchange.close()
-            log.info("[API] 🔌 Exchange connection closed.")
-        except Exception as e:
-            log.error(f"[API] ❌ Failed to close exchange: {e}")
+        await self.exchange.close()
