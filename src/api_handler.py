@@ -4,6 +4,7 @@ import asyncio
 import logging
 import random
 import time
+import hashlib
 import ccxt.async_support as ccxt_async
 import ccxt.pro as ccxtpro
 from functools import wraps
@@ -41,6 +42,7 @@ class ApiHandler:
           • cached market IDs
           • price precision scaling
           • robust OHLCV fetching
+          • synchronous wrappers for trade_executor
         """
         self.cfg = cfg
         self.disable_ws = cfg.get("disable_ws", False)
@@ -50,7 +52,7 @@ class ApiHandler:
         # REST client for robust order creation and OHLCV
         self.rest_exchange = self._init_rest_exchange(api_key, api_secret)
 
-        # Websocket-enabled client for live data (tickers, OHLCV, order books)
+        # Websocket-enabled client for live data (tickers, OHLCV, order books, orders)
         self.ws_exchange = ccxtpro.phemex(
             {
                 "apiKey": api_key,
@@ -87,15 +89,12 @@ class ApiHandler:
         now = time.time()
         if reload or not self.market_map or (now - self.last_market_load) > 3600:
             try:
-                # WS client load_markets to populate markets for websocket methods
                 await self.ws_exchange.load_markets()
-                # Build market_map from WS client's loaded markets
                 self.market_map = {
                     symbol: market["id"]
                     for symbol, market in self.ws_exchange.markets.items()
                     if market.get("spot", True)
                 }
-                # Also cache price scales (10**pricePrecision)
                 for symbol, market in self.ws_exchange.markets.items():
                     prec = market.get("precision", {}).get("price", 2)
                     self.price_scales[symbol] = 10 ** prec
@@ -126,13 +125,12 @@ class ApiHandler:
         """
         if symbol not in self.price_scales:
             await self.load_markets(reload=True)
-        return self.price_scales.get(symbol, 100)  # Default to 2-decimal scaling
+        return self.price_scales.get(symbol, 100)
 
     @retry
     async def fetch_ohlcv(self, symbol: str, timeframe: str, since=None, limit=None, params=None):
         """
         Fetch OHLCV via REST with retry and throttling.
-        Always passes a 'to' timestamp and uses market_id.
         """
         async with self.throttle:
             try:
@@ -204,21 +202,6 @@ class ApiHandler:
         return await self.ws_exchange.watch_ticker(market_id)
 
     @retry
-    async def fetch_tickers(self, symbols: List[str]) -> Dict[str, dict]:
-        """
-        Fetch multiple tickers via REST+throttle, returns a dict symbol→ticker.
-        """
-        results = {}
-        for symbol in symbols:
-            try:
-                ticker = await self.get_ticker(symbol)
-                if ticker:
-                    results[symbol] = ticker
-            except Exception as e:
-                logger.error(f"[API] Failed to fetch ticker for {symbol}: {e}")
-        return results
-
-    @retry
     async def fetch_order_book(self, symbol: str, limit: int = 5):
         """
         Fetch order book, preferring WebSocket. Fallback to REST if needed.
@@ -246,7 +229,7 @@ class ApiHandler:
 
     async def create_market_order(self, symbol: str, side: str, amount: float):
         """
-        Place a market order (via REST). Rounds amount to the correct precision.
+        Place a market order (via WS). Rounds amount to the correct precision.
         """
         try:
             async with self.throttle:
@@ -262,7 +245,7 @@ class ApiHandler:
 
     async def create_limit_order(self, symbol: str, side: str, amount: float, price: float, params: dict):
         """
-        Place a limit order (via REST), rounding both amount and price to correct precisions.
+        Place a limit order (via WS), rounding both amount and price to correct precisions.
         """
         try:
             async with self.throttle:
@@ -338,6 +321,48 @@ class ApiHandler:
                 if i == retries - 1:
                     raise
                 await asyncio.sleep(2 ** i)
+
+    def get_reference_price(self, symbol: str) -> float:
+        """
+        Synchronous wrapper to fetch last price (ticker).
+        """
+        loop = asyncio.get_event_loop()
+        ticker = loop.run_until_complete(self.get_ticker(symbol))
+        if not ticker:
+            raise RuntimeError(f"Could not fetch reference price for {symbol}")
+        return float(ticker.get("last", ticker.get("close", 0.0)))
+
+    def place_order(
+        self,
+        symbol: str,
+        side: str,
+        order_type: str,
+        quantity: float,
+        price: Optional[float] = None,
+        ioc_timeout: int = 1000,
+    ) -> Dict:
+        """
+        Synchronous wrapper to place limit or market order.
+        """
+        loop = asyncio.get_event_loop()
+        if order_type == "market":
+            return loop.run_until_complete(self.create_market_order(symbol, side, quantity))
+        else:
+            # Calculate scaled priceEp if needed
+            priceEp = None
+            if price is not None:
+                scale = loop.run_until_complete(self.get_price_scale(symbol))
+                priceEp = int(price * scale)
+            params = {"priceEp": priceEp, "timeInForce": "IOC"} if ioc_timeout else {}
+            return loop.run_until_complete(self.create_limit_order(symbol, side, quantity, price, params))
+
+    def cancel_order(self, symbol: str, order_id: str) -> None:
+        """
+        Synchronous wrapper to cancel an open order by ID.
+        """
+        loop = asyncio.get_event_loop()
+        market_id = self.get_market_id(symbol)
+        loop.run_until_complete(self.ws_exchange.cancel_order(market_id, order_id))
 
     async def close(self):
         """
