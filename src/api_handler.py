@@ -61,8 +61,8 @@ class ApiHandler:
             }
         )
 
-        self.market_map: Dict[str, str] = {}      # symbol -> market_id
-        self.price_scales: Dict[str, int] = {}    # symbol -> 10**precision.price
+        self.market_map: Dict[str, str] = {}      # symbol → market_id
+        self.price_scales: Dict[str, int] = {}    # symbol → 10**precision.price
         self.last_market_load = 0
 
     def _init_rest_exchange(self, api_key: str, api_secret: str):
@@ -352,3 +352,7 @@ class ApiHandler:
             await self.ws_exchange.close()
         except Exception as e:
             logger.warning(f"[API] Failed to close WS exchange cleanly: {e}")
+
+
+# Alias PhemexAPI so imports in other files still work
+PhemexAPI = ApiHandler
