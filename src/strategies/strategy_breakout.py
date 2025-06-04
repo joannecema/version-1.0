@@ -47,7 +47,6 @@ class BreakoutStrategy:
             log.debug(f"[BREAKOUT] Volume not sufficient on {symbol}: {current_volume:.2f} < {avg_volume:.2f}")
             return None
 
-        # Breakout logic
         capital = await self.tracker.get_available_usdt()
         size = self.executor._calculate_trade_size(capital, current_close)
 
