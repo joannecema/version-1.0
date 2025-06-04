@@ -71,6 +71,12 @@ class ApiHandler:
                 await asyncio.sleep(1)
         return []
 
+    async def get_ohlcv(self, symbol: str, timeframe: str = '1m', limit: int = 20) -> List[List[float]]:
+        """
+        Alias for fetch_ohlcv() to maintain compatibility with older strategy calls.
+        """
+        return await self.fetch_ohlcv(symbol, timeframe, limit)
+
     async def create_market_order(self, symbol: str, side: str, amount: float) -> Optional[Dict]:
         try:
             order = await self.exchange.create_market_order(symbol, side, amount)
