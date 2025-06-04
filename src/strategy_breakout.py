@@ -26,38 +26,38 @@ class BreakoutStrategy:
             log.warning(f"[BREAKOUT] ⚠️ Not enough OHLCV for {symbol} (got {len(ohlcv)})")
             return None
 
-        highs = [c[2] for c in ohlcv[:-1]]
-        lows = [c[3] for c in ohlcv[:-1]]
-        volumes = [c[5] for c in ohlcv[:-1]]
-
-        last_candle = ohlcv[-1]
-        current_close = last_candle[4]
-        current_high = last_candle[2]
-        current_low = last_candle[3]
-        current_volume = last_candle[5]
-
-        max_high = max(highs)
-        min_low = min(lows)
-        avg_volume = sum(volumes) / len(volumes)
-
-        # Volume confirmation
-        if current_volume < avg_volume * self.volume_multiplier:
-            log.debug(f"[BREAKOUT] ❌ Volume not sufficient on {symbol}: {current_volume:.2f} < {avg_volume:.2f}")
-            return None
-
         try:
+            highs = [c[2] for c in ohlcv[:-1]]
+            lows = [c[3] for c in ohlcv[:-1]]
+            volumes = [c[5] for c in ohlcv[:-1]]
+
+            last_candle = ohlcv[-1]
+            current_close = last_candle[4]
+            current_high = last_candle[2]
+            current_low = last_candle[3]
+            current_volume = last_candle[5]
+
+            max_high = max(highs)
+            min_low = min(lows)
+            avg_volume = sum(volumes) / len(volumes)
+
+            if current_volume < avg_volume * self.volume_multiplier:
+                log.debug(f"[BREAKOUT] ❌ Volume not sufficient on {symbol}: {current_volume:.2f} < {avg_volume:.2f}")
+                return None
+
             capital = await self.tracker.get_available_usdt()
             size = self.executor._calculate_trade_size(capital, current_close)
-        except Exception as e:
-            log.error(f"[BREAKOUT] ❌ Failed to calculate trade size for {symbol}: {e}")
+
+            if current_high > max_high:
+                log.info(f"[BREAKOUT] ✅ BREAKOUT UP {symbol} | {current_high:.4f} > {max_high:.4f} | size={size}")
+                return "buy", size
+            elif current_low < min_low:
+                log.info(f"[BREAKOUT] ✅ BREAKOUT DOWN {symbol} | {current_low:.4f} < {min_low:.4f} | size={size}")
+                return "sell", size
+
+            log.debug(f"[BREAKOUT] ❌ No breakout on {symbol} | Close={current_close:.4f}")
             return None
 
-        if current_high > max_high:
-            log.info(f"[BREAKOUT] ✅ BREAKOUT UP on {symbol} | {current_high:.4f} > {max_high:.4f}")
-            return "buy", size
-        elif current_low < min_low:
-            log.info(f"[BREAKOUT] ✅ BREAKOUT DOWN on {symbol} | {current_low:.4f} < {min_low:.4f}")
-            return "sell", size
-
-        log.debug(f"[BREAKOUT] ❌ No breakout on {symbol} | Close={current_close:.4f}")
-        return None
+        except Exception as e:
+            log.error(f"[BREAKOUT] ❌ Signal calc failed for {symbol}: {e}")
+            return None
