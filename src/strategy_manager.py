@@ -17,7 +17,7 @@ class StrategyManager:
             from src.strategy_ema_rsi import EmaRsiStrategy
             from src.strategy_grid import GridStrategy
         except ImportError as e:
-            log.error(f"[STRATEGY] ❌ Failed to import one or more strategies: {e}")
+            log.error(f"[STRATEGY] ❌ Failed to import strategies: {e}")
             raise
 
         self.strategies = {
@@ -27,45 +27,43 @@ class StrategyManager:
             "grid": GridStrategy(api, config, tracker, executor)
         }
 
-    async def execute(self, symbol: str):
-        enabled_strategies = self.config.get("strategy_stack", [])
+    async def execute(self):
+        enabled = self.config.get("strategy_stack", [])
+        symbols = await self.api.get_top_symbols(
+            count=self.config.get("symbols_count", 10),
+            exclude_stable=True
+        )
+
         now = asyncio.get_event_loop().time()
 
-        for strategy_name in enabled_strategies:
+        for strategy_name in enabled:
             strategy = self.strategies.get(strategy_name)
             if not strategy:
-                log.warning(f"[STRATEGY] ❌ Strategy {strategy_name} not recognized — skipping.")
+                log.warning(f"[STRATEGY] ❌ Strategy {strategy_name} not found.")
                 continue
 
-            cooldown_key = f"{strategy_name}:{symbol}"
-            if self.cooldowns.get(cooldown_key, 0) > now:
-                log.info(f"[STRATEGY] ⏳ Cooldown active for {cooldown_key}")
-                continue
-
-            try:
-                signal = await strategy.check_signal(symbol)
-                if not signal:
-                    log.debug(f"[STRATEGY] ❌ No signal for {symbol} in {strategy_name}")
+            for symbol in symbols:
+                cooldown_key = f"{strategy_name}:{symbol}"
+                if self.cooldowns.get(cooldown_key, 0) > now:
+                    log.info(f"[STRATEGY] ⏳ Cooldown active for {cooldown_key}")
                     continue
 
-                side, size = signal
+                try:
+                    signal = await strategy.check_signal(symbol)
+                    if signal:
+                        side, size = signal
+                        if getattr(self.tracker, "has_open_position", lambda s: False)(symbol):
+                            log.info(f"[STRATEGY] 🔄 {symbol} already in open position — skipping {strategy_name}")
+                            continue
 
-                # Check if symbol already has open position
-                has_position = False
-                if hasattr(self.tracker, "has_open_position"):
-                    has_position = self.tracker.has_open_position(symbol)
-
-                if has_position:
-                    log.info(f"[STRATEGY] 🔄 {symbol} already in open position — skipping {strategy_name}")
-                    continue
-
-                result = await self.executor.execute_order(symbol, side, size)
-                if result:
-                    self.tracker.record_entry(symbol, side, size, result.get("price"))
-                else:
-                    log.warning(f"[STRATEGY] ⚠️ Order failed or rejected for {symbol} in {strategy_name}")
-                    self.cooldowns[cooldown_key] = now + 60  # Retry cooldown
-
-            except Exception as e:
-                log.error(f"[STRATEGY] 💥 Error in {strategy_name} on {symbol}: {e}")
-                self.cooldowns[cooldown_key] = now + 90  # Backoff cooldown
+                        result = await self.executor.execute_order(symbol, side, size)
+                        if result:
+                            self.tracker.record_entry(symbol, side, size, result['price'])
+                        else:
+                            log.warning(f"[STRATEGY] ⚠️ Order failed for {symbol}")
+                            self.cooldowns[cooldown_key] = now + 60  # 1-minute cooldown
+                    else:
+                        log.debug(f"[STRATEGY] ❌ No signal for {symbol} in {strategy_name}")
+                except Exception as e:
+                    log.error(f"[STRATEGY] 💥 Error in {strategy_name} on {symbol}: {e}")
+                    self.cooldowns[cooldown_key] = now + 90  # 90s cooldown on error
