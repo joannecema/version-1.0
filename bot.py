@@ -85,9 +85,14 @@ async def main():
     api_key = os.getenv("API_KEY")
     api_secret = os.getenv("API_SECRET")
     api = ApiHandler(api_key, api_secret, cfg)
-    await api.exchange.load_markets()
+    await api.load_markets()
 
     tracker = PositionTracker(cfg, api)
+    if not hasattr(tracker, "trade_history"):
+        tracker.trade_history = []
+    if not hasattr(tracker, "equity"):
+        tracker.equity = cfg.get("initial_equity", 900)
+
     executor = TradeExecutor(api, tracker, cfg)
     manager = StrategyManager(cfg, api, tracker, executor)
     vrf = VolatilityRegimeFilter(api, cfg)
@@ -110,20 +115,24 @@ async def main():
             await asyncio.sleep(cfg["pause_seconds_on_break"])
             consecutive_losses = 0
 
-        if not await vrf.allow_trading("BTC/USDT"):
-            logging.info("🚫 High volatility – skipping cycle")
-            await asyncio.sleep(cfg["execution_interval_sec"])
-            continue
+        symbols = await api.get_top_symbols(limit=cfg["symbols_count"])
 
-        await manager.execute()
+        for symbol in symbols:
+            if not await vrf.allow_trading(symbol):
+                logging.info(f"[SKIP] {symbol} blocked by volatility regime filter")
+                continue
+
+            logging.info(f"[CYCLE] Executing strategies for {symbol}")
+            await manager.execute(symbol)
+
         await tracker.evaluate_open_positions()
         cycle += 1
 
         if cycle % cfg["report_interval_cycles"] == 0:
             df = pd.DataFrame(tracker.trade_history)
-            wins = len(df[df["pnl"] > 0])
+            wins = len(df[df["pnl"] > 0]) if not df.empty else 0
             tot = len(df)
-            roi = (tracker.equity / tracker.config.get("initial_equity", 900) - 1) * 100
+            roi = (tracker.equity / cfg.get("initial_equity", 900) - 1) * 100
             logging.info(
                 f"📊 Equity: ${tracker.equity:.2f} | ROI: {roi:.1f}% | Trades: {tot} | Wins: {wins}"
             )
