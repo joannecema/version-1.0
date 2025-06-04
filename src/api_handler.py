@@ -1,232 +1,83 @@
-# src/api_handler.py
-
-import asyncio
+import ccxt.async_support as ccxt
 import logging
-import random
-import time
-from functools import wraps
-from typing import List, Dict, Optional
+import asyncio
+from typing import List, Optional, Dict
 
-import ccxt.pro as ccxtpro
-
-logger = logging.getLogger("ApiHandler")
-
-
-def retry(fn):
-    @wraps(fn)
-    async def wrapped(*args, **kwargs):
-        last_exc = None
-        for i in range(5):
-            try:
-                return await fn(*args, **kwargs)
-            except Exception as e:
-                last_exc = e
-                wait = (2 ** i) + random.uniform(0, 1)
-                logger.warning(f"[RETRY] {fn.__name__} failed (attempt {i + 1}): {e} — retrying in {wait:.2f}s")
-                await asyncio.sleep(wait)
-        logger.error(f"[RETRY] {fn.__name__} ultimately failed: {last_exc}")
-        raise last_exc
-    return wrapped
-
+log = logging.getLogger("API")
 
 class ApiHandler:
-    def __init__(self, api_key, api_secret, cfg):
-        self.cfg = cfg
-        self.disable_ws = cfg.get("disable_ws", False)
-        self.throttle = asyncio.Semaphore(cfg.get("max_concurrent_requests", 3))
-
-        self.exchange = ccxtpro.phemex({
-            "apiKey": api_key,
-            "secret": api_secret,
-            "enableRateLimit": True,
-            "options": {"defaultType": "spot"}
+    def __init__(self, api_key: str, api_secret: str):
+        self.exchange = ccxt.phemex({
+            'apiKey': api_key,
+            'secret': api_secret,
+            'enableRateLimit': True,
+            'options': {
+                'defaultType': 'spot',
+            }
         })
-
-        self.market_map = {}
+        self.markets = {}
+        self.symbol_map = {}
 
     async def load_markets(self):
         try:
-            await self.exchange.load_markets()
-            self.market_map = {
-                symbol: market["id"]
-                for symbol, market in self.exchange.markets.items()
-                if market.get("spot", True)
+            self.markets = await self.exchange.load_markets()
+            self.symbol_map = {
+                symbol: market['id'] for symbol, market in self.markets.items()
             }
-            logger.info(f"[API] ✅ Loaded {len(self.market_map)} spot symbols from Phemex")
+            log.info(f"[API] ✅ Loaded {len(self.markets)} markets from Phemex")
         except Exception as e:
-            logger.error(f"[API] ❌ Failed to load markets: {e}")
-            raise
+            log.error(f"[API] ❌ Failed to load markets: {e}")
 
-    def get_market_id(self, symbol: str) -> str:
-        if symbol in self.market_map:
-            return self.market_map[symbol]
+    async def get_balance(self, currency: str = "USDT") -> float:
         try:
-            market = self.exchange.market(symbol)
-            return market["id"]
+            balance = await self.exchange.fetch_balance()
+            free_balance = balance.get(currency, {}).get('free', 0)
+            log.debug(f"[API] Free {currency} balance: {free_balance}")
+            return free_balance
         except Exception as e:
-            logger.warning(f"[API] ⚠️ Symbol resolution fallback for {symbol}: {e}")
-            return symbol.replace("/", "")
+            log.error(f"[API] ❌ Failed to fetch balance: {e}")
+            return 0
 
-    @retry
-    async def fetch_ohlcv(self, symbol: str, timeframe: str = "1m", since=None, limit: int = 100, params=None):
-        async with self.throttle:
-            try:
-                market_id = self.get_market_id(symbol)
-                query = params.copy() if params else {}
-                query["to"] = int(time.time() * 1000)
-                return await self.exchange.fetch_ohlcv(market_id, timeframe=timeframe, since=since, limit=limit, params=query)
-            except Exception as e:
-                logger.error(f"[API] fetch_ohlcv failed for {symbol}: {e}")
-                return []
-
-    async def get_ohlcv(self, symbol, timeframe, limit):
+    async def fetch_ticker(self, symbol: str) -> Optional[float]:
         try:
-            if not self.disable_ws:
-                return await self.watch_ohlcv(symbol, timeframe, limit)
+            ticker = await self.exchange.fetch_ticker(symbol)
+            return ticker.get("last")
         except Exception as e:
-            logger.warning(f"[API] watch_ohlcv failed for {symbol}, falling back to REST: {e}")
-        await asyncio.sleep(0.25)
-        to_ts = int(time.time() * 1000)
-        seconds = self.exchange.parse_timeframe(timeframe)
-        from_ts = to_ts - limit * seconds * 1000
-        return await self.fetch_ohlcv(symbol, timeframe, since=from_ts, limit=limit)
-
-    @retry
-    async def watch_ohlcv(self, symbol, timeframe, limit):
-        if self.disable_ws:
-            raise RuntimeError("WebSocket is disabled by config.")
-        market_id = self.get_market_id(symbol)
-        return await self.exchange.watch_ohlcv(market_id, timeframe, limit)
-
-    @retry
-    async def fetch_ticker(self, symbol: str):
-        async with self.throttle:
-            market_id = self.get_market_id(symbol)
-            return await self.exchange.fetch_ticker(market_id)
-
-    async def get_ticker(self, symbol: str):
-        try:
-            if not self.disable_ws:
-                return await self.watch_ticker(symbol)
-        except Exception as e:
-            logger.warning(f"[API] WebSocket ticker failed for {symbol}, fallback to REST: {e}")
-        try:
-            return await self.fetch_ticker(symbol)
-        except Exception as e2:
-            logger.error(f"[API] fetch_ticker also failed for {symbol}: {e2}")
+            log.error(f"[API] ❌ Failed to fetch ticker for {symbol}: {e}")
             return None
 
-    @retry
-    async def watch_ticker(self, symbol):
-        if self.disable_ws:
-            raise RuntimeError("WebSocket is disabled by config.")
-        market_id = self.get_market_id(symbol)
-        return await self.exchange.watch_ticker(market_id)
-
-    @retry
-    async def fetch_tickers(self, symbols: List[str]) -> Dict[str, dict]:
-        results = {}
-        for symbol in symbols:
+    async def fetch_ohlcv(self, symbol: str, timeframe: str = '1m', limit: int = 20) -> List[List[float]]:
+        for attempt in range(3):
             try:
-                ticker = await self.get_ticker(symbol)
-                if ticker:
-                    results[symbol] = ticker
-            except Exception as e:
-                logger.error(f"[API] Failed to fetch ticker for {symbol}: {e}")
-        return results
+                if symbol not in self.symbol_map:
+                    log.debug(f"[API] Symbol {symbol} not found in symbol_map, reloading markets")
+                    await self.load_markets()
 
-    @retry
-    async def fetch_order_book(self, symbol, limit=5):
-        market_id = self.get_market_id(symbol)
-        if self.disable_ws:
-            logger.warning(f"[API] WebSocket is disabled — using REST for {symbol}")
-            try:
-                async with self.throttle:
-                    return await self.exchange.fetch_order_book(market_id, limit=limit)
-            except Exception as e:
-                logger.error(f"[API] REST fetch_order_book failed for {symbol}: {e}")
-                return None
-        else:
-            try:
-                return await self.exchange.watch_order_book(market_id, limit)
-            except Exception as e:
-                logger.warning(f"[API] WebSocket order book failed for {symbol}, fallback to REST: {e}")
-                try:
-                    async with self.throttle:
-                        return await self.exchange.fetch_order_book(market_id, limit=limit)
-                except Exception as e2:
-                    logger.error(f"[API] REST fallback also failed for {symbol}: {e2}")
-                    return None
+                symbol_id = self.symbol_map.get(symbol)
+                if not symbol_id:
+                    log.error(f"[API] ❌ Symbol ID not found for {symbol}")
+                    return []
 
-    async def create_market_order(self, symbol, side, amount):
+                log.debug(f"[API] Fetching OHLCV for {symbol} (ID: {symbol_id})")
+                ohlcv = await self.exchange.fetch_ohlcv(symbol_id, timeframe=timeframe, limit=limit)
+                return ohlcv
+            except ccxt.RateLimitExceeded:
+                wait = (attempt + 1) * 2
+                log.warning(f"[API] ⏳ Rate limit hit for {symbol}. Retrying in {wait}s...")
+                await asyncio.sleep(wait)
+            except Exception as e:
+                log.error(f"[API] ❌ fetch_ohlcv failed for {symbol}: {e}")
+                await asyncio.sleep(1)
+        return []
+
+    async def create_market_order(self, symbol: str, side: str, amount: float) -> Optional[Dict]:
         try:
-            async with self.throttle:
-                market_id = self.get_market_id(symbol)
-                market = self.exchange.market(symbol)
-                prec_amt = market["precision"].get("amount", 8)
-                amt = round(float(amount), prec_amt)
-                logger.debug(f"[API] Market order → {side.upper()} {symbol} qty={amt}")
-                return await self.exchange.create_order(market_id, "market", side, amt)
+            order = await self.exchange.create_market_order(symbol, side, amount)
+            log.info(f"[API] ✅ Placed {side.upper()} order for {symbol}: size={amount}")
+            return order
         except Exception as e:
-            logger.error(f"[API] Failed to place market order for {symbol}: {e}")
+            log.error(f"[API] ❌ Failed to place {side.upper()} order for {symbol}: {e}")
             return None
-
-    async def create_limit_order(self, symbol, side, amount, price, params):
-        try:
-            async with self.throttle:
-                market_id = self.get_market_id(symbol)
-                market = self.exchange.market(symbol)
-                prec_amt = market["precision"].get("amount", 8)
-                prec_prc = market["precision"].get("price", 8)
-                amt = round(float(amount), prec_amt)
-                prc = round(float(price), prec_prc)
-
-                clean_params = {}
-                for k, v in (params or {}).items():
-                    if isinstance(v, float):
-                        try:
-                            clean_params[k] = int(float(v))
-                        except Exception:
-                            clean_params[k] = str(int(round(v)))
-                    else:
-                        clean_params[k] = v
-
-                logger.debug(f"[API] Payload → {side.upper()} {symbol} qty={amt} price={prc} PARAMS={clean_params}")
-                order = await self.exchange.create_order(market_id, "limit", side, amt, prc, clean_params)
-                logger.info(f"[API] Order placed → ID={order.get('id')} STATUS={order.get('status')}")
-                logger.debug(f"[API] Raw response: {order}")
-                return order
-        except Exception as e:
-            logger.error(f"[API] Failed to place limit order for {symbol}: {e}")
-            return None
-
-    @retry
-    async def fetch_open_orders(self, symbol=None):
-        try:
-            async with self.throttle:
-                if symbol:
-                    market_id = self.get_market_id(symbol)
-                    return await self.exchange.fetch_open_orders(market_id)
-                else:
-                    return await self.exchange.fetch_open_orders()
-        except Exception as e:
-            logger.error(f"[API] Failed to fetch open orders for {symbol or 'ALL'}: {e}")
-            return []
-
-    async def log_open_orders(self, symbol=None):
-        orders = await self.fetch_open_orders(symbol)
-        if not orders:
-            logger.info(f"[ORDERS] No open orders for {symbol or 'ALL'}")
-        else:
-            for order in orders:
-                logger.info(
-                    f"[ORDERS] Open → ID={order.get('id')} SYMBOL={order.get('symbol')} "
-                    f"SIDE={order.get('side')} PRICE={order.get('price')} AMOUNT={order.get('amount')} "
-                    f"STATUS={order.get('status')} CREATED={order.get('datetime')}"
-                )
 
     async def close(self):
-        try:
-            await self.exchange.close()
-        except Exception as e:
-            logger.warning(f"[API] Failed to close exchange cleanly: {e}")
+        await self.exchange.close()
