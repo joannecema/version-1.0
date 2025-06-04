@@ -5,6 +5,8 @@ from typing import List, Optional, Dict
 
 log = logging.getLogger("API")
 
+STABLECOINS = {"USDT", "USDC", "TUSD", "BUSD", "DAI", "USDP"}
+
 class ApiHandler:
     def __init__(self, api_key: str, api_secret: str, config: Optional[Dict] = None):
         self.config = config or {}
@@ -28,6 +30,35 @@ class ApiHandler:
             log.info(f"[API] ✅ Loaded {len(self.markets)} markets from Phemex")
         except Exception as e:
             log.error(f"[API] ❌ Failed to load markets: {e}")
+
+    async def get_top_symbols(self, limit: int = 10) -> List[str]:
+        try:
+            if not self.markets:
+                await self.load_markets()
+
+            tickers = await self.exchange.fetch_tickers()
+            ranked = sorted(
+                [
+                    (s, t['quoteVolume'])
+                    for s, t in tickers.items()
+                    if s in self.markets
+                    and isinstance(t.get('quoteVolume'), (int, float))
+                    and self._is_valid_symbol(s)
+                ],
+                key=lambda x: x[1],
+                reverse=True
+            )
+            top_symbols = [s for s, _ in ranked[:limit]]
+            log.info(f"[API] 📈 Top {limit} trading symbols: {top_symbols}")
+            return top_symbols
+        except Exception as e:
+            log.error(f"[API] ❌ Failed to fetch top symbols: {e}")
+            return ["BTC/USDT"]
+
+    def _is_valid_symbol(self, symbol: str) -> bool:
+        """Exclude stablecoin-only pairs"""
+        base, quote = symbol.split("/")
+        return quote.upper() in STABLECOINS and base.upper() not in STABLECOINS
 
     async def get_balance(self, currency: str = "USDT") -> float:
         try:
@@ -55,7 +86,6 @@ class ApiHandler:
 
                 market_id = self.symbol_map.get(symbol)
                 if not market_id:
-                    # Fallback to find matching symbol
                     for market in self.markets.values():
                         if market['symbol'].replace("/", "").upper() == symbol.replace("/", "").upper():
                             market_id = market['id']
