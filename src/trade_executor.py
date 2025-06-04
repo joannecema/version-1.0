@@ -95,7 +95,7 @@ class PhemexTradeExecutor(TradeExecutor):
             )
             return True
 
-    @exponential_backoff(retries=3, delay=1.0)
+    @exponential_backoff(retries=3, base_delay=1.0)
     def execute_order(self, order: Order) -> bool:
         """
         Attempts to place an order on Phemex.
