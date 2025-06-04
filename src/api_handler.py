@@ -17,13 +17,13 @@ class ApiHandler:
             }
         })
         self.markets = {}
-        self.symbol_map = {}
+        self.symbol_map = {}  # Maps "BTC/USDT" → "BTCUSDT"
 
     async def load_markets(self):
         try:
             self.markets = await self.exchange.load_markets()
             self.symbol_map = {
-                symbol: market['id'] for symbol, market in self.markets.items()
+                market['symbol']: market['id'] for market in self.markets.values()
             }
             log.info(f"[API] ✅ Loaded {len(self.markets)} markets from Phemex")
         except Exception as e:
@@ -41,8 +41,7 @@ class ApiHandler:
 
     async def fetch_ticker(self, symbol: str) -> Optional[float]:
         try:
-            ticker = await self.exchange.fetch_ticker(symbol)
-            return ticker.get("last")
+            return (await self.exchange.fetch_ticker(symbol)).get("last")
         except Exception as e:
             log.error(f"[API] ❌ Failed to fetch ticker for {symbol}: {e}")
             return None
@@ -51,26 +50,24 @@ class ApiHandler:
         for attempt in range(3):
             try:
                 if not self.markets or symbol not in self.symbol_map:
-                    log.debug(f"[API] Symbol {symbol} not in map — reloading markets")
+                    log.debug(f"[API] Symbol {symbol} not in symbol_map — reloading markets")
                     await self.load_markets()
 
-                # Get normalized symbol ID for use with Phemex
-                symbol_id = self.symbol_map.get(symbol)
-                if not symbol_id:
-                    log.error(f"[API] ❌ Market ID not found for symbol: {symbol}")
+                market_id = self.symbol_map.get(symbol)
+                if not market_id:
+                    log.error(f"[API] ❌ No market ID found for {symbol}")
                     return []
 
                 now = self.exchange.milliseconds()
                 since = now - self.exchange.parse_timeframe(timeframe) * 1000 * limit
 
-                log.debug(f"[API] Fetching OHLCV for {symbol} (ID: {symbol_id})")
-                ohlcv = await self.exchange.fetch_ohlcv(
-                    symbol_id,
+                log.debug(f"[API] Fetching OHLCV: {symbol} → {market_id} | {since}–{now}")
+                return await self.exchange.fetch_ohlcv(
+                    market_id,
                     timeframe=timeframe,
                     since=since,
                     params={"to": now}
                 )
-                return ohlcv
             except ccxt.RateLimitExceeded:
                 wait = (attempt + 1) * 2
                 log.warning(f"[API] ⏳ Rate limit hit for {symbol}. Retrying in {wait}s...")
