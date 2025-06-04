@@ -6,7 +6,8 @@ from typing import List, Optional, Dict
 log = logging.getLogger("API")
 
 class ApiHandler:
-    def __init__(self, api_key: str, api_secret: str):
+    def __init__(self, api_key: str, api_secret: str, config: Optional[Dict] = None):
+        self.config = config or {}
         self.exchange = ccxt.phemex({
             'apiKey': api_key,
             'secret': api_secret,
@@ -49,8 +50,8 @@ class ApiHandler:
     async def fetch_ohlcv(self, symbol: str, timeframe: str = '1m', limit: int = 20) -> List[List[float]]:
         for attempt in range(3):
             try:
-                if symbol not in self.symbol_map:
-                    log.debug(f"[API] Symbol {symbol} not found in symbol_map, reloading markets")
+                if not self.markets or symbol not in self.symbol_map:
+                    log.debug(f"[API] Symbol {symbol} not in map — reloading markets")
                     await self.load_markets()
 
                 symbol_id = self.symbol_map.get(symbol)
