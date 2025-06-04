@@ -7,6 +7,7 @@ log = logging.getLogger("API")
 
 STABLECOINS = {"USDT", "USDC", "TUSD", "BUSD", "DAI", "USDP"}
 
+
 class ApiHandler:
     def __init__(self, api_key: str, api_secret: str, config: Optional[Dict] = None):
         self.config = config or {}
@@ -134,3 +135,21 @@ class ApiHandler:
 
     async def close(self):
         await self.exchange.close()
+
+
+# ✅ Add PhemexAPI for compatibility with trade_executor
+class PhemexAPI(ApiHandler):
+    async def place_order(self, symbol: str, side: str, amount: float) -> Optional[Dict]:
+        return await self.create_market_order(symbol, side, amount)
+
+    async def cancel_order(self, order_id: str) -> bool:
+        try:
+            result = await self.exchange.cancel_order(order_id)
+            log.info(f"[API] ✅ Cancelled order {order_id}")
+            return True
+        except Exception as e:
+            log.warning(f"[API] ❌ Failed to cancel order {order_id}: {e}")
+            return False
+
+    async def get_reference_price(self, symbol: str) -> Optional[float]:
+        return await self.fetch_ticker(symbol)
