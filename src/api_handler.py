@@ -17,7 +17,7 @@ class ApiHandler:
             }
         })
         self.markets = {}
-        self.symbol_map = {}  # Maps "BTC/USDT" → "BTCUSDT"
+        self.symbol_map = {}  # "BTC/USDT" → "BTCUSDT"
 
     async def load_markets(self):
         try:
@@ -29,6 +29,9 @@ class ApiHandler:
         except Exception as e:
             log.error(f"[API] ❌ Failed to load markets: {e}")
 
+    def get_market_id(self, symbol: str) -> Optional[str]:
+        return self.symbol_map.get(symbol)
+
     async def get_balance(self, currency: str = "USDT") -> float:
         try:
             balance = await self.exchange.fetch_balance()
@@ -37,11 +40,22 @@ class ApiHandler:
             return free_balance
         except Exception as e:
             log.error(f"[API] ❌ Failed to fetch balance: {e}")
-            return 0
+            return 0.0
 
-    async def fetch_ticker(self, symbol: str) -> Optional[float]:
+    async def fetch_ticker(self, symbol: str) -> Optional[Dict]:
         try:
-            return (await self.exchange.fetch_ticker(symbol)).get("last")
+            if not self.markets or symbol not in self.symbol_map:
+                await self.load_markets()
+            market_id = self.get_market_id(symbol)
+            if not market_id:
+                log.error(f"[API] ❌ Ticker fetch failed — Market ID missing for {symbol}")
+                return None
+            ticker = await self.exchange.fetch_ticker(market_id)
+            return {
+                "bid": ticker.get("bid"),
+                "ask": ticker.get("ask"),
+                "last": ticker.get("last"),
+            }
         except Exception as e:
             log.error(f"[API] ❌ Failed to fetch ticker for {symbol}: {e}")
             return None
@@ -53,7 +67,7 @@ class ApiHandler:
                     log.debug(f"[API] Symbol {symbol} not in symbol_map — reloading markets")
                     await self.load_markets()
 
-                market_id = self.symbol_map.get(symbol)
+                market_id = self.get_market_id(symbol)
                 if not market_id:
                     log.error(f"[API] ❌ No market ID found for {symbol}")
                     return []
@@ -61,13 +75,14 @@ class ApiHandler:
                 now = self.exchange.milliseconds()
                 since = now - self.exchange.parse_timeframe(timeframe) * 1000 * limit
 
-                log.debug(f"[API] Fetching OHLCV: {symbol} → {market_id} | {since}–{now}")
-                return await self.exchange.fetch_ohlcv(
+                log.debug(f"[API] Fetching OHLCV for {symbol} ({market_id}), since {since}")
+                ohlcv = await self.exchange.fetch_ohlcv(
                     market_id,
                     timeframe=timeframe,
                     since=since,
                     params={"to": now}
                 )
+                return ohlcv
             except ccxt.RateLimitExceeded:
                 wait = (attempt + 1) * 2
                 log.warning(f"[API] ⏳ Rate limit hit for {symbol}. Retrying in {wait}s...")
@@ -82,7 +97,14 @@ class ApiHandler:
 
     async def create_market_order(self, symbol: str, side: str, amount: float) -> Optional[Dict]:
         try:
-            order = await self.exchange.create_market_order(symbol, side, amount)
+            if not self.markets or symbol not in self.symbol_map:
+                await self.load_markets()
+            market_id = self.get_market_id(symbol)
+            if not market_id:
+                log.error(f"[API] ❌ Cannot create order — Market ID not found for {symbol}")
+                return None
+
+            order = await self.exchange.create_market_order(market_id, side, amount)
             log.info(f"[API] ✅ Placed {side.upper()} order for {symbol}: size={amount}")
             return order
         except Exception as e:
