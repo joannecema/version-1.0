@@ -1,14 +1,15 @@
 import time
 import logging
+from datetime import datetime
 
 log = logging.getLogger("PositionTracker")
-
 
 class PositionTracker:
     def __init__(self, config, api):
         self.config = config
         self.api = api
         self.positions = {}  # symbol -> position dict
+        self.trade_history = []  # ✅ FIXED: tracks closed trades for bot-level logic
 
     def record_entry(self, symbol, side, size, price):
         self.positions[symbol] = {
@@ -25,11 +26,23 @@ class PositionTracker:
         if not position:
             log.warning(f"[TRACKER] ⚠️ Tried to exit unknown position for {symbol}")
             return
+
         roi = self._calculate_roi(position["entry_price"], exit_price, position["side"])
         log.info(
             f"[TRACKER] 🔴 Exit {symbol} side={position['side']} size={position['size']} "
             f"@ {exit_price} | ROI={roi:.4f}"
         )
+
+        # ✅ FIXED: track in trade history
+        self.trade_history.append({
+            "symbol": symbol,
+            "side": position["side"],
+            "entry_price": position["entry_price"],
+            "exit_price": exit_price,
+            "size": position["size"],
+            "pnl": roi,
+            "timestamp": datetime.utcnow().isoformat()
+        })
 
     def get_open_position(self, symbol):
         return self.positions.get(symbol)
@@ -50,7 +63,7 @@ class PositionTracker:
         for symbol, pos in list(self.positions.items()):
             current_price = await self.get_price(symbol)
             if not current_price:
-                log.warning(f"[TRACKER] ⚠️ Skipping evaluation for {symbol} — price unavailable")
+                log.warning(f"[TRACKER] ⚠️ Skipping eval for {symbol} — price unavailable")
                 continue
 
             roi = self._calculate_roi(pos["entry_price"], current_price, pos["side"])
@@ -82,8 +95,8 @@ class PositionTracker:
 
     async def get_price(self, symbol):
         try:
-            ticker = await self.api.get_ticker(symbol)
-            return ticker['last'] if ticker and 'last' in ticker else None
+            ticker = await self.api.fetch_ticker(symbol)
+            return ticker if ticker else None
         except Exception as e:
-            log.error(f"[TRACKER] ❌ Failed to fetch ticker for {symbol}: {e}")
+            log.error(f"[TRACKER] ❌ Failed to fetch price for {symbol}: {e}")
             return None
