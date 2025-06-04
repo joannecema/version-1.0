@@ -89,12 +89,10 @@ async def main():
 
     try:
         symbols = cfg.get("symbols", [])
-        if not symbols:
-            raise ValueError("No symbols configured")
         cfg["symbols"] = symbols
     except Exception as e:
-        logging.error(f"[API] ❌ Failed to fetch top symbols: {e}")
-        return
+        logging.warning(f"[CONFIG] Could not load symbols: {e}")
+        cfg["symbols"] = ["BTC/USDT"]
 
     tracker = PositionTracker(cfg, api)
     executor = TradeExecutor(api, tracker, cfg)
@@ -113,38 +111,44 @@ async def main():
     consecutive_losses = 0
     cycle = 0
 
-    while True:
-        if consecutive_losses >= cfg["max_consecutive_losses"]:
-            logging.warning("⚠️ Circuit breaker – pausing")
-            await asyncio.sleep(cfg["pause_seconds_on_break"])
-            consecutive_losses = 0
+    try:
+        while True:
+            if consecutive_losses >= cfg["max_consecutive_losses"]:
+                logging.warning("⚠️ Circuit breaker – pausing")
+                await asyncio.sleep(cfg["pause_seconds_on_break"])
+                consecutive_losses = 0
 
-        if not await vrf.allow_trading("BTC/USDT"):
-            logging.info("🚫 High volatility – skipping cycle")
+            for symbol in cfg.get("symbols", []):
+                if not await vrf.allow_trading(symbol):
+                    logging.info(f"🚫 High volatility – skipping {symbol}")
+                    continue
+
+                logging.info(f"[CYCLE] Executing strategies for {symbol}")
+                await manager.execute()  # FIX 1: Removed passing `symbol` to execute()
+
+                await tracker.evaluate_open_positions()
+
+            cycle += 1
+
+            if cycle % cfg["report_interval_cycles"] == 0:
+                df = pd.DataFrame(tracker.trade_history)
+                wins = len(df[df["pnl"] > 0])
+                tot = len(df)
+                roi = (tracker.equity / tracker.config.get("initial_equity", 900) - 1) * 100
+                logging.info(
+                    f"📊 Equity: ${tracker.equity:.2f} | ROI: {roi:.1f}% | Trades: {tot} | Wins: {wins}"
+                )
+
+            if tracker.trade_history and tracker.trade_history[-1]["pnl"] < 0:
+                consecutive_losses += 1
+            else:
+                consecutive_losses = 0
+
             await asyncio.sleep(cfg["execution_interval_sec"])
-            continue
 
-        await manager.execute()  # ✅ FIXED: Correct call without extra args
-        await tracker.evaluate_open_positions()
-        cycle += 1
+    finally:
+        await api.close()  # FIX 3: Ensure Phemex API is closed properly on exit
 
-        if cycle % cfg["report_interval_cycles"] == 0:
-            df = pd.DataFrame(tracker.trade_history)
-            wins = len(df[df["pnl"] > 0])
-            tot = len(df)
-            roi = (tracker.equity / tracker.config.get("initial_equity", 900) - 1) * 100
-            logging.info(
-                f"📊 Equity: ${tracker.equity:.2f} | ROI: {roi:.1f}% | Trades: {tot} | Wins: {wins}"
-            )
-
-        if tracker.trade_history and tracker.trade_history[-1]["pnl"] < 0:
-            consecutive_losses += 1
-        else:
-            consecutive_losses = 0
-
-        await asyncio.sleep(cfg["execution_interval_sec"])
-
-    await api.close()  # ✅ FIXED: Clean shutdown
 
 if __name__ == "__main__":
     asyncio.run(main())
