@@ -86,7 +86,7 @@ async def main():
     await api.exchange.load_markets()
 
     tracker = PositionTracker(cfg, api)
-    executor = TradeExecutor(api, tracker, cfg)  # ✅ FIXED: Removed md_queue
+    executor = TradeExecutor(api, tracker, cfg)
     manager = StrategyManager(cfg, api, tracker, executor)
     vrf = VolatilityRegimeFilter(api, cfg)
 
@@ -104,12 +104,12 @@ async def main():
 
     while True:
         if consecutive_losses >= cfg["max_consecutive_losses"]:
-            logging.warning("Circuit breaker – pausing")
+            logging.warning("⚠️ Circuit breaker – pausing")
             await asyncio.sleep(cfg["pause_seconds_on_break"])
             consecutive_losses = 0
 
         if not await vrf.allow_trading("BTC/USDT"):
-            logging.info("High volatility – skipping cycle")
+            logging.info("🚫 High volatility – skipping cycle")
             await asyncio.sleep(cfg["execution_interval_sec"])
             continue
 
@@ -121,7 +121,7 @@ async def main():
             wins = len(df[df["pnl"] > 0])
             tot = len(df)
             logging.info(
-                f"Equity: ${tracker.config.get('initial_equity', 900):.2f} | "
+                f"📊 Equity: ${tracker.config.get('initial_equity', 900):.2f} | "
                 f"ROI: {(tracker.equity/900 - 1) * 100:.1f}% | "
                 f"Trades: {tot} | Wins: {wins}"
             )
