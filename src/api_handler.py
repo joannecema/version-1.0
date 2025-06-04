@@ -54,17 +54,21 @@ class ApiHandler:
                     log.debug(f"[API] Symbol {symbol} not in map — reloading markets")
                     await self.load_markets()
 
+                # Get normalized symbol ID for use with Phemex
                 symbol_id = self.symbol_map.get(symbol)
                 if not symbol_id:
-                    log.error(f"[API] ❌ Symbol ID not found for {symbol}")
+                    log.error(f"[API] ❌ Market ID not found for symbol: {symbol}")
                     return []
 
                 now = self.exchange.milliseconds()
                 since = now - self.exchange.parse_timeframe(timeframe) * 1000 * limit
-                log.debug(f"[API] Fetching OHLCV for {symbol_id} from {since} to {now}")
 
+                log.debug(f"[API] Fetching OHLCV for {symbol} (ID: {symbol_id})")
                 ohlcv = await self.exchange.fetch_ohlcv(
-                    symbol_id, timeframe=timeframe, since=since, params={"to": now}
+                    symbol_id,
+                    timeframe=timeframe,
+                    since=since,
+                    params={"to": now}
                 )
                 return ohlcv
             except ccxt.RateLimitExceeded:
@@ -77,9 +81,6 @@ class ApiHandler:
         return []
 
     async def get_ohlcv(self, symbol: str, timeframe: str = '1m', limit: int = 20) -> List[List[float]]:
-        """
-        Alias for fetch_ohlcv to maintain compatibility with older strategy references.
-        """
         return await self.fetch_ohlcv(symbol, timeframe, limit)
 
     async def create_market_order(self, symbol: str, side: str, amount: float) -> Optional[Dict]:
