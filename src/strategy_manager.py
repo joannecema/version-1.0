@@ -39,7 +39,7 @@ class StrategyManager:
         for strategy_name in enabled:
             strategy = self.strategies.get(strategy_name)
             if not strategy:
-                log.warning(f"[STRATEGY] ❌ Strategy {strategy_name} not found.")
+                log.warning(f"[STRATEGY] ❌ Strategy '{strategy_name}' not found or not initialized.")
                 continue
 
             for symbol in symbols:
@@ -52,18 +52,21 @@ class StrategyManager:
                     signal = await strategy.check_signal(symbol)
                     if signal:
                         side, size = signal
-                        if getattr(self.tracker, "has_open_position", lambda s: False)(symbol):
+
+                        has_position = getattr(self.tracker, "has_open_position", lambda s: False)
+                        if has_position(symbol):
                             log.info(f"[STRATEGY] 🔄 {symbol} already in open position — skipping {strategy_name}")
                             continue
 
                         result = await self.executor.execute_order(symbol, side, size)
                         if result:
-                            self.tracker.record_entry(symbol, side, size, result['price'])
+                            self.tracker.record_entry(symbol, side, size, result.get("price"))
                         else:
-                            log.warning(f"[STRATEGY] ⚠️ Order failed for {symbol}")
+                            log.warning(f"[STRATEGY] ⚠️ Order failed for {symbol} — applying cooldown")
                             self.cooldowns[cooldown_key] = now + 60  # 1-minute cooldown
                     else:
-                        log.debug(f"[STRATEGY] ❌ No signal for {symbol} in {strategy_name}")
+                        log.debug(f"[STRATEGY] ❌ No signal for {symbol} under {strategy_name}")
+
                 except Exception as e:
                     log.error(f"[STRATEGY] 💥 Error in {strategy_name} on {symbol}: {e}")
                     self.cooldowns[cooldown_key] = now + 90  # 90s cooldown on error
