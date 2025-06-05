@@ -91,16 +91,23 @@ class ApiHandler:
         if not self.market_map:
             await self.load_markets()
         
+        # Validate symbol exists
+        if symbol not in self.market_map:
+            await self.load_markets(reload=True)
+            if symbol not in self.market_map:
+                logger.error("Symbol %s not found in market map", symbol)
+                return []
+        
         params = params.copy() if params else {}
 
         # Always pass 'limit' via params, not as positional
         if limit is not None:
             params['limit'] = limit
 
-        # Inject 'to' parameter for Phemex API with future timestamp clamping
-        if self.exchange.id == 'phemex':
+        # Only set 'to' parameter for Phemex when 'since' is provided
+        if self.exchange.id == 'phemex' and since is not None:
             now_ms = int(time.time() * 1000)
-            if since is not None and limit is not None:
+            if limit is not None:
                 timeframe_sec = self._timeframe_to_seconds(timeframe)
                 to_time = since + (limit * timeframe_sec * 1000)
                 # Clamp to current time to prevent future timestamp errors
@@ -117,7 +124,7 @@ class ApiHandler:
                         symbol,
                         timeframe,
                         since=since,
-                        limit=None,
+                        limit=limit,  # Pass limit directly to exchange
                         params=params
                     )
             except BadRequest as e:
