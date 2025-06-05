@@ -18,11 +18,15 @@ class VolatilityRegimeFilter:
         with robust error handling and performance optimizations
         """
         try:
-            # Fetch OHLCV data with buffer to account for potential gaps
+            # Calculate since parameter to get exactly needed candles
+            since = await self._calculate_since_timestamp(symbol)
+            
+            # Fetch OHLCV data with calculated since parameter
             ohlcv = await self.api.get_ohlcv(
                 symbol, 
                 self.timeframe, 
-                self.lookback + 5  # Extra buffer for data gaps
+                limit=self.lookback + 5,  # Extra buffer for data gaps
+                since=since
             )
             
             if not ohlcv:
@@ -78,3 +82,22 @@ class VolatilityRegimeFilter:
         except Exception as e:
             log.error(f"[VRF] Error processing {symbol}: {e}", exc_info=True)
             return False
+            
+    async def _calculate_since_timestamp(self, symbol: str) -> Optional[int]:
+        """Calculate since timestamp for efficient data fetching"""
+        try:
+            # Get current time in milliseconds
+            current_time_ms = int(time.time() * 1000)
+            
+            # Calculate timeframe in milliseconds
+            timeframe_seconds = self.api._timeframe_to_seconds(self.timeframe)
+            timeframe_ms = timeframe_seconds * 1000
+            
+            # Calculate needed timeframe
+            needed_timeframe = (self.lookback + 5) * timeframe_ms
+            
+            # Return start timestamp
+            return current_time_ms - needed_timeframe
+        except Exception as e:
+            log.error(f"[VRF] Error calculating since timestamp for {symbol}: {e}")
+            return None
