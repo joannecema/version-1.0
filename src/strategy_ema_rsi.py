@@ -2,6 +2,7 @@
 import logging
 import numpy as np
 import talib
+import asyncio
 from typing import Optional, Tuple
 
 log = logging.getLogger("EMARSI")
@@ -13,16 +14,7 @@ class EmaRsiStrategy:
         self.tracker = tracker
         self.executor = executor
         self.price_scale = {}
-        
-        self.timeframe = config.get("timeframe", "1m")
-        self.lookback = max(50, config.get("lookback", 50))
-        self.ema_short_period = config.get("ema_short", 12)
-        self.ema_long_period = config.get("ema_long", 26)
-        self.rsi_period = config.get("rsi_period", 14)
-        self.rsi_oversold = config.get("rsi_oversold", 30)
-        self.rsi_overbought = config.get("rsi_overbought", 70)
         self.strategy_name = "ema_rsi"
-        self.testnet = config.get("testnet", False)
 
     async def _get_price_scale(self, symbol):
         if symbol not in self.price_scale:
@@ -35,23 +27,19 @@ class EmaRsiStrategy:
             if await self.tracker.has_open_position(symbol):
                 return None
                 
-            # Get OHLCV with buffer for technical indicators
-            ohlcv = await self.api.fetch_ohlcv_with_retry(
+            ohlcv = await self.api.get_ohlcv(
                 symbol, 
-                self.timeframe, 
-                limit=self.lookback + self.ema_long_period + 5,
-                max_retries=3
+                self.config.get("timeframe", "1m"), 
+                limit=50 + 5
             )
             
-            if len(ohlcv) < self.lookback:
+            if len(ohlcv) < 50:
                 return None
 
             closes = np.array([bar[4] for bar in ohlcv], dtype=float)
-            
-            # Calculate indicators with TA-Lib
-            ema_short = talib.EMA(closes, timeperiod=self.ema_short_period)[-1]
-            ema_long = talib.EMA(closes, timeperiod=self.ema_long_period)[-1]
-            rsi = talib.RSI(closes, timeperiod=self.rsi_period)[-1]
+            ema_short = talib.EMA(closes, timeperiod=self.config.get("ema_short", 12))[-1]
+            ema_long = talib.EMA(closes, timeperiod=self.config.get("ema_long", 26))[-1]
+            rsi = talib.RSI(closes, timeperiod=self.config.get("rsi_period", 14))[-1]
             
             if np.isnan(ema_short) or np.isnan(ema_long) or np.isnan(rsi):
                 return None
@@ -64,19 +52,15 @@ class EmaRsiStrategy:
                 price_scale
             )
 
-            # Signal conditions
-            if ema_short > ema_long and rsi < self.rsi_oversold:
+            if ema_short > ema_long and rsi < self.config.get("rsi_oversold", 30):
                 log.info("[%s] BUY %s | EMA: %.4f > %.4f, RSI: %.2f", 
                          self.strategy_name.upper(), symbol, ema_short, ema_long, rsi)
                 return ("buy", size)
-            elif ema_short < ema_long and rsi > self.rsi_overbought:
+            elif ema_short < ema_long and rsi > self.config.get("rsi_overbought", 70):
                 log.info("[%s] SELL %s | EMA: %.4f < %.4f, RSI: %.2f", 
                          self.strategy_name.upper(), symbol, ema_short, ema_long, rsi)
                 return ("sell", size)
                 
-        except self.api.RateLimitExceeded:
-            log.warning("[%s] Rate limit exceeded for %s", self.strategy_name.upper(), symbol)
-            await asyncio.sleep(10)
         except Exception as e:
             log.exception("[%s] Error for %s: %s", self.strategy_name.upper(), symbol, e)
         return None
