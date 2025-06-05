@@ -1,6 +1,8 @@
+# cross_exchange_arbitrage_strategy.py
 import logging
-import ccxt.pro as ccxtpro
 import asyncio
+import os
+import ccxt.async_support as ccxt
 
 log = logging.getLogger("CrossExchangeArbitrage")
 
@@ -13,9 +15,11 @@ class CrossExchangeArbitrageStrategy:
         self.cfg = cfg
 
         self.pairs = cfg.get("cross_ex_pairs", [])
-        self.thresh = cfg.get("arb_threshold_pct", 0.002)  # e.g. 0.2%
+        self.thresh = cfg.get("arb_threshold_pct", 0.002)
 
-        self.binance = ccxtpro.binance({
+        self.binance = ccxt.binance({
+            "apiKey": os.getenv("BINANCE_API_KEY"),
+            "secret": os.getenv("BINANCE_API_SECRET"),
             "enableRateLimit": True,
         })
 
@@ -23,15 +27,15 @@ class CrossExchangeArbitrageStrategy:
 
     async def initialize(self):
         try:
-            await self.phemex.load_markets()
-            await self.binance.load_markets()
+            await asyncio.gather(
+                self.phemex.load_markets(),
+                self.binance.load_markets()
+            )
             self._markets_loaded = True
-            log.info("[ARB] ✅ Market data loaded for Phemex and Binance.")
         except Exception as e:
-            log.error(f"[ARB] ❌ Failed to load markets: {e}")
-            self._markets_loaded = False
+            log.error(f"[ARB] Market load failed: {e}")
 
-    async def check_and_trade(self, _=None):
+    async def check_and_trade(self):
         if not self._markets_loaded:
             await self.initialize()
             if not self._markets_loaded:
@@ -39,48 +43,35 @@ class CrossExchangeArbitrageStrategy:
 
         for symbol, _ in self.pairs:
             try:
-                # Get Phemex market ID (normalized)
                 market_id = self.api.get_market_id(symbol)
-                p_tick = await self.api.get_ticker(symbol)
-                if not p_tick:
-                    raise ValueError("Phemex ticker returned None")
-            except Exception as e:
-                log.error(f"[ARB] ❌ Failed to fetch Phemex ticker for {symbol}: {e}")
-                continue
-
-            try:
-                # Prefer Binance WebSocket, fallback to REST
-                b_tick = await self.binance.watch_ticker(symbol)
-            except Exception as e:
-                log.warning(f"[ARB] ⚠️ WebSocket failed for {symbol}, falling back to REST: {e}")
-                try:
-                    b_tick = await self.binance.fetch_ticker(symbol)
-                except Exception as e2:
-                    log.error(f"[ARB] ❌ Binance REST ticker failed for {symbol}: {e2}")
+                p_tick, b_tick = await asyncio.gather(
+                    self.api.fetch_ticker(symbol),
+                    self.binance.fetch_ticker(symbol)
+                )
+                
+                if not p_tick or not b_tick:
+                    continue
+                    
+                p_bid = p_tick.get("bid", 0)
+                b_ask = b_tick.get("ask", 0)
+                
+                if p_bid <= 0 or b_ask <= 0:
                     continue
 
-            # Extract bid/ask
-            p_bid = p_tick.get("bid")
-            b_ask = b_tick.get("ask")
+                spread_pct = (p_bid - b_ask) / b_ask
+                log.debug(f"[ARB] {symbol} spread: {spread_pct:.4%}")
 
-            if not p_bid or not b_ask or b_ask <= 0:
-                log.warning(f"[ARB] ⚠️ Invalid price data for {symbol}: Phemex bid={p_bid}, Binance ask={b_ask}")
-                continue
-
-            spread_pct = (p_bid - b_ask) / b_ask
-            log.debug(f"[ARB] {symbol} spread: {spread_pct:.4%}")
-
-            if spread_pct >= self.thresh:
-                try:
-                    usdt_balance = await self.tracker.get_available_usdt()
+                if spread_pct >= self.thresh:
+                    usdt_balance = self.tracker.get_available_usdt()
                     risk_pct = self.cfg.get("risk_pct", 0.1)
-                    qty = round((usdt_balance * risk_pct) / b_ask, 6)
+                    qty = (usdt_balance * risk_pct) / b_ask
+                    
+                    # Execute in parallel
+                    await asyncio.gather(
+                        self.exec.execute_order("binance", symbol, "buy", qty),
+                        self.exec.execute_order("phemex", market_id, "sell", qty)
+                    )
+                    log.info(f"[ARB] Executed arb: {symbol} | QTY={qty:.4f}")
 
-                    await self.exec.market_cross_order("binance", symbol, "buy", qty)
-                    await self.exec.market_cross_order("phemex", market_id, "sell", qty)
-
-                    log.info(f"[ARB] ✅ Arbitrage executed: {symbol} | QTY={qty:.4f} | Spread={spread_pct:.4%}")
-                except Exception as e:
-                    log.error(f"[ARB] ❌ Order execution failed for {symbol}: {e}")
-            else:
-                log.debug(f"[ARB] ❌ No arb: spread={spread_pct:.4%} < threshold={self.thresh:.4%}")
+            except Exception as e:
+                log.error(f"[ARB] Error for {symbol}: {e}")
