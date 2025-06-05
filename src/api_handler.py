@@ -125,30 +125,30 @@ class ApiHandler:
             else:
                 params['to'] = now_ms
 
-            # Handle limit adjustment safely
+            # Handle limit adjustment safely - COMPLETELY NEW APPROACH
             if limit is not None:
+                # First, ensure limit is a valid integer
+                try:
+                    safe_limit = int(limit)
+                except (TypeError, ValueError):
+                    logger.warning(f"Invalid limit type for {symbol}, using default")
+                    safe_limit = 500
+                
+                # Get max allowed limit from market data
+                max_limit = 500  # Default safe value
                 try:
                     market = self.exchange.markets.get(symbol)
                     if market:
                         max_limit = self._get_safe_max_limit(market)
-                        # Final type check before min operation
+                        # Final type validation
                         if not isinstance(max_limit, (int, float)):
                             logger.warning(f"Unexpected max_limit type for {symbol}: {type(max_limit)}")
                             max_limit = 500
-                        limit = min(limit, int(max_limit))
                 except Exception as e:
-                    logger.error(f"Limit adjustment failed for {symbol}: {str(e)}")
-                    # Robust fallback - ensure limit is integer
-                    try:
-                        # Try to convert to integer if possible
-                        if isinstance(limit, (int, float)):
-                            limit = int(limit)
-                        else:
-                            limit = 500
-                    except Exception:
-                        limit = 500
-                    # Enforce maximum
-                    limit = min(limit, 500) if isinstance(limit, int) else 500
+                    logger.error(f"Max limit lookup failed for {symbol}: {str(e)}")
+                
+                # Apply safe constraint
+                limit = min(safe_limit, int(max_limit))
 
         for attempt in range(retries):
             try:
@@ -158,6 +158,11 @@ class ApiHandler:
                     )
             except BadRequest as e:
                 logger.error(f"BadRequest for {symbol}: {str(e)}")
+                # Special handling for invalid arguments error
+                if "30000" in str(e) and "arguments" in str(e):
+                    logger.info(f"Retrying {symbol} with default parameters after BadRequest")
+                    # Try without any custom parameters
+                    return await self.exchange.fetch_ohlcv(symbol, timeframe, since, limit)
                 raise
             except (NetworkError, ExchangeError, RequestTimeout) as e:
                 if attempt == retries - 1:
@@ -181,21 +186,20 @@ class ApiHandler:
     def _get_safe_max_limit(self, market: Dict[str, Any]) -> int:
         """Robust limit extraction with multiple fallbacks"""
         try:
-            # Check for nested limit structure
+            # First try standard CCXT structure
             limits = market.get('limits', {})
             amount = limits.get('amount', {})
             max_limit = amount.get('max')
             
+            # If not found, try exchange-specific field
+            if max_limit is None and 'info' in market:
+                info = market['info']
+                max_limit = info.get('maxOrderQty')
+            
             # Handle different data types
             if max_limit is None:
-                # Try alternative location
-                if 'info' in market:
-                    info = market['info']
-                    if 'maxOrderQty' in info:
-                        max_limit = info['maxOrderQty']
-            
-            # Process the value regardless of source
-            if isinstance(max_limit, dict):
+                return 500
+            elif isinstance(max_limit, dict):
                 logger.debug(f"Found dict max_limit for {market['symbol']}")
                 return 500
             elif isinstance(max_limit, (int, float)):
