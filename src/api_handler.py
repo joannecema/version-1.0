@@ -138,8 +138,17 @@ class ApiHandler:
                         limit = min(limit, int(max_limit))
                 except Exception as e:
                     logger.error(f"Limit adjustment failed for {symbol}: {str(e)}")
-                    # Simplified safe fallback
-                    limit = min(limit, 500) if limit and isinstance(limit, int) else 500
+                    # Robust fallback - ensure limit is integer
+                    try:
+                        # Try to convert to integer if possible
+                        if isinstance(limit, (int, float)):
+                            limit = int(limit)
+                        else:
+                            limit = 500
+                    except Exception:
+                        limit = 500
+                    # Enforce maximum
+                    limit = min(limit, 500) if isinstance(limit, int) else 500
 
         for attempt in range(retries):
             try:
@@ -178,6 +187,14 @@ class ApiHandler:
             max_limit = amount.get('max')
             
             # Handle different data types
+            if max_limit is None:
+                # Try alternative location
+                if 'info' in market:
+                    info = market['info']
+                    if 'maxOrderQty' in info:
+                        max_limit = info['maxOrderQty']
+            
+            # Process the value regardless of source
             if isinstance(max_limit, dict):
                 logger.debug(f"Found dict max_limit for {market['symbol']}")
                 return 500
@@ -186,18 +203,6 @@ class ApiHandler:
             elif isinstance(max_limit, str) and max_limit.isdigit():
                 return int(max_limit)
                 
-            # Check alternative locations with type handling
-            if 'info' in market:
-                info = market['info']
-                if 'maxOrderQty' in info:
-                    value = info['maxOrderQty']
-                    if isinstance(value, dict):
-                        logger.debug(f"Found dict maxOrderQty for {market['symbol']}")
-                        return 500
-                    elif isinstance(value, (int, float)):
-                        return int(value)
-                    elif isinstance(value, str) and value.isdigit():
-                        return int(value)
         except Exception as e:
             logger.debug(f"Limit extraction error: {str(e)}")
             
