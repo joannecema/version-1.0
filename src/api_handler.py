@@ -93,7 +93,17 @@ class ApiHandler:
         if limit is not None:
             params['limit'] = limit
 
-        # Do NOT inject a 'to' timestamp; let CCXT handle since+limit
+        # Inject 'to' parameter for Phemex API:
+        # - If 'since' is provided and 'limit' is provided, compute to = since + (limit * timeframe)
+        # - Otherwise, set to = now (ms)
+        if self.exchange.id == 'phemex':
+            now_ms = int(time.time() * 1000)
+            if since is not None and limit is not None:
+                timeframe_sec = self._timeframe_to_seconds(timeframe)
+                params['to'] = since + (limit * timeframe_sec * 1000)
+            else:
+                params['to'] = now_ms
+
         for attempt in range(retries):
             try:
                 async with self.semaphore:
@@ -104,6 +114,10 @@ class ApiHandler:
                         limit=None,
                         params=params
                     )
+            except BadRequest as e:
+                # BadRequest likely means missing or invalid parameters—stop retrying
+                logger.error("BadRequest for %s: %s", symbol, e)
+                raise
             except (NetworkError, ExchangeError, RequestTimeout) as e:
                 if attempt == retries - 1:
                     logger.error("OHLCV ultimately failed for %s: %s", symbol, e)
@@ -114,10 +128,6 @@ class ApiHandler:
                     attempt + 1, symbol, e, wait
                 )
                 await asyncio.sleep(wait)
-            except BadRequest as e:
-                # BadRequest likely means wrong symbol or args—stop retrying
-                logger.error("BadRequest for %s: %s", symbol, e)
-                raise
         return []
         
     async def get_ohlcv(
