@@ -83,10 +83,12 @@ class ApiHandler:
         retries: int = 3
     ) -> List[List[float]]:
         """Fetch OHLCV bars with retry logic and correct Phemex parameter handling."""
-        # Ensure markets are loaded so exchange.markets exists
+        # Ensure markets are loaded so self.market_map is populated
         if not self.market_map:
             await self.load_markets()
-        
+
+        # Translate human-readable symbol (e.g. "BTC/USDT") to Phemex market ID (e.g. "BTCUSDT")
+        market_id = self.market_map.get(symbol, symbol)
         params = params.copy() if params else {}
 
         # Always pass 'limit' via params, not as positional
@@ -108,14 +110,14 @@ class ApiHandler:
             try:
                 async with self.semaphore:
                     return await self.exchange.fetch_ohlcv(
-                        symbol,
+                        market_id,
                         timeframe,
                         since=since,
                         limit=None,
                         params=params
                     )
             except BadRequest as e:
-                # BadRequest likely means missing or invalid parameters—stop retrying
+                # BadRequest likely means missing/invalid parameters—stop retrying
                 logger.error("BadRequest for %s: %s", symbol, e)
                 raise
             except (NetworkError, ExchangeError, RequestTimeout) as e:
@@ -212,3 +214,4 @@ class ApiHandler:
         except Exception as e:
             logger.error("Balance fetch failed: %s", e)
             return {}
+
