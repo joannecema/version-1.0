@@ -91,14 +91,17 @@ class ApiHandler:
         market_id = self.market_map.get(symbol, symbol)
         params = params.copy() if params else {}
 
-        # Handle Phemex-specific 'to' parameter if since is provided
-        if self.exchange.id == 'phemex' and since is not None:
-            to_timestamp = int(time.time() * 1000)  # use ms
-            if limit is not None:
-                # Calculate end time based on timeframe and limit
+        # FIX: Always add 'to' parameter for Phemex to prevent API errors
+        if self.exchange.id == 'phemex':
+            # Default to current time in seconds
+            to_timestamp = int(time.time())
+            
+            # Calculate end time if since and limit are provided
+            if since is not None and limit is not None:
                 timeframe_sec = self._timeframe_to_seconds(timeframe)
-                # since is in ms, convert to seconds, then back to ms after adding
-                to_timestamp = since + (limit * timeframe_sec * 1000)
+                # Convert since from ms to seconds and add duration
+                to_timestamp = int(since / 1000) + (limit * timeframe_sec)
+            
             params['to'] = to_timestamp
 
         # Always pass 'limit' inside params instead of as positional
