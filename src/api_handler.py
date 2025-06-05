@@ -15,8 +15,8 @@ class ApiHandler:
         self.market_map: Dict[str, str] = {}
         self.price_scales: Dict[str, int] = {}
         self.last_market_load = 0
-        self.semaphore = asyncio.Semaphore(5)  # Rate limiting
-        
+        self.semaphore = asyncio.Semaphore(5)  # Limit concurrent calls
+       
     def _init_exchange(self, api_key, api_secret):
         params = {
             "apiKey": api_key,
@@ -37,6 +37,7 @@ class ApiHandler:
         if reload or not self.market_map or (current_time - self.last_market_load) > 3600:
             try:
                 markets = await self.exchange.load_markets()
+                # Build symbol→market ID map (e.g. "BTC/USDT" → "BTCUSDT")
                 self.market_map = {symbol: market["id"] for symbol, market in markets.items()}
                 self.price_scales = {
                     symbol: 10 ** market["precision"]["price"]
@@ -60,7 +61,7 @@ class ApiHandler:
         return market.get("contractSize", 1.0) if market else 1.0
         
     def _timeframe_to_seconds(self, timeframe: str) -> int:
-        """Convert timeframe string to seconds"""
+        """Convert timeframe string to seconds (e.g. "1m" → 60)"""
         units = {
             's': 1,
             'm': 60,
@@ -70,7 +71,7 @@ class ApiHandler:
         }
         unit = timeframe[-1]
         value = int(timeframe[:-1])
-        return value * units[unit]
+        return value * units.get(unit, 1)
         
     async def fetch_ohlcv_robust(
         self,
@@ -81,38 +82,50 @@ class ApiHandler:
         params: Optional[Dict[str, Any]] = None,
         retries: int = 3
     ) -> List[List[float]]:
-        """Fetch OHLCV with retry logic and Phemex parameter handling"""
-        params = params or {}
-        exchange_id = self.exchange.id
-        
-        # Handle Phemex-specific parameters
-        if exchange_id == 'phemex' and since is not None:
-            # Calculate 'to' timestamp (current time if limit not provided)
-            to_timestamp = int(time.time())
-            
+        """Fetch OHLCV bars with retry logic and correct Phemex parameter handling."""
+        # Ensure markets are loaded so market_map is populated
+        if not self.market_map:
+            await self.load_markets()
+
+        # Translate symbol to Phemex market ID if available
+        market_id = self.market_map.get(symbol, symbol)
+        params = params.copy() if params else {}
+
+        # Handle Phemex-specific 'to' parameter if since is provided
+        if self.exchange.id == 'phemex' and since is not None:
+            to_timestamp = int(time.time() * 1000)  # use ms
             if limit is not None:
                 # Calculate end time based on timeframe and limit
                 timeframe_sec = self._timeframe_to_seconds(timeframe)
-                to_timestamp = int(since / 1000) + (limit * timeframe_sec)
-            
+                # since is in ms, convert to seconds, then back to ms after adding
+                to_timestamp = since + (limit * timeframe_sec * 1000)
             params['to'] = to_timestamp
-        
+
+        # Always pass 'limit' inside params instead of as positional
+        if limit is not None:
+            params['limit'] = limit
+
         for attempt in range(retries):
             try:
                 async with self.semaphore:
+                    # Note: we pass since=None and limit=None positionally,
+                    # and put both into params to avoid Phemex ccxt bug
                     return await self.exchange.fetch_ohlcv(
-                        symbol, 
-                        timeframe, 
-                        since=since, 
-                        limit=limit, 
+                        market_id,
+                        timeframe,
+                        since=None,
+                        limit=None,
                         params=params
                     )
             except (NetworkError, ExchangeError, RequestTimeout) as e:
                 if attempt == retries - 1:
+                    logger.error("OHLCV ultimately failed for %s: %s", symbol, e)
                     raise
                 wait = 2 ** attempt
-                logger.warning("OHLCV attempt %d failed: %s - retrying in %ds", 
-                              attempt+1, e, wait)
+                logger.warning(
+                    "OHLCV attempt %d for %s failed: %s — retrying in %ds",
+                    attempt + 1, symbol, e, wait
+                )
                 await asyncio.sleep(wait)
         return []
         
@@ -123,7 +136,7 @@ class ApiHandler:
         limit: int = 20,
         since: Optional[int] = None
     ) -> List[List[float]]:
-        """Get OHLCV data with robust fetching"""
+        """Get OHLCV data using the robust fetch method."""
         return await self.fetch_ohlcv_robust(
             symbol=symbol,
             timeframe=timeframe,
@@ -140,30 +153,31 @@ class ApiHandler:
         price_ep: Optional[int] = None, 
         ioc_timeout: int = 1000
     ) -> Dict[str, Any]:
-        """Place order with proper Phemex parameters"""
+        """Place an order on Phemex with the correct param usage."""
         try:
             params = {}
             if price_ep:
                 params["priceEp"] = price_ep
             if ioc_timeout and order_type == "limit":
                 params["timeInForce"] = "IOC"
-                
             async with self.semaphore:
                 return await self.exchange.create_order(
                     symbol,
                     order_type,
                     side,
                     quantity,
-                    None,  # price should be in priceEp
+                    None,  # Price is encoded via priceEp in params
                     params
                 )
         except Exception as e:
-            logger.error("Order failed: %s %s %s @ %s: %s", 
-                         symbol, order_type, side, price_ep, e)
+            logger.error(
+                "Order failed: symbol=%s, type=%s, side=%s, priceEp=%s, error=%s", 
+                symbol, order_type, side, price_ep, e
+            )
             return {"status": "error", "error": str(e)}
             
     async def cancel_order(self, symbol: str, order_id: str) -> Optional[Dict[str, Any]]:
-        """Cancel order on exchange"""
+        """Cancel an existing order on Phemex."""
         try:
             async with self.semaphore:
                 return await self.exchange.cancel_order(order_id, symbol)
@@ -172,7 +186,7 @@ class ApiHandler:
             return None
             
     async def fetch_positions(self) -> Dict[str, Any]:
-        """Fetch open positions from exchange"""
+        """Fetch all open positions."""
         try:
             async with self.semaphore:
                 return await self.exchange.fetch_positions()
@@ -181,7 +195,7 @@ class ApiHandler:
             return {}
             
     async def fetch_ticker(self, symbol: str) -> Optional[Dict[str, Any]]:
-        """Fetch ticker data"""
+        """Fetch the latest ticker for a symbol."""
         try:
             async with self.semaphore:
                 return await self.exchange.fetch_ticker(symbol)
@@ -190,7 +204,7 @@ class ApiHandler:
             return None
             
     async def fetch_balance(self) -> Dict[str, Any]:
-        """Fetch account balance"""
+        """Fetch account balances."""
         try:
             async with self.semaphore:
                 return await self.exchange.fetch_balance()
