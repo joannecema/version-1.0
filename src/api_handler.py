@@ -1,3 +1,4 @@
+# api_handler.py
 import asyncio
 import logging
 import time
@@ -15,7 +16,7 @@ class ApiHandler:
         self.market_map: Dict[str, str] = {}
         self.price_scales: Dict[str, int] = {}
         self.last_market_load = 0
-        self.semaphore = asyncio.Semaphore(5)
+        self.semaphore = asyncio.Semaphore(10)  # Increased concurrency
         self.market_load_lock = asyncio.Lock()
        
     def _init_exchange(self, api_key, api_secret):
@@ -45,30 +46,23 @@ class ApiHandler:
                         
                         for symbol, market in markets.items():
                             try:
-                                # Handle market ID mapping
                                 self.market_map[symbol] = market["id"]
-                                
-                                # Robust precision handling
                                 precision = market.get("precision", {})
                                 price_precision = precision.get("price")
                                 
                                 if price_precision is None:
-                                    logger.warning(f"Price precision is None for {symbol}, using default")
-                                    self.price_scales[symbol] = 100  # Default to 2 decimals
+                                    self.price_scales[symbol] = 100
                                 elif isinstance(price_precision, (int, float)):
                                     self.price_scales[symbol] = 10 ** int(price_precision)
                                 else:
-                                    logger.warning(f"Unexpected price precision type for {symbol}: {type(price_precision)}")
                                     self.price_scales[symbol] = 100
-                            except Exception as e:
-                                logger.error(f"Error processing market {symbol}: {str(e)}")
+                            except Exception:
                                 self.price_scales[symbol] = 100
                         
                         self.last_market_load = current_time
                         logger.info(f"Loaded {len(markets)} markets")
                     except Exception as e:
                         logger.error(f"Market load failed: {str(e)}")
-                        # Preserve existing markets if available
                         if not self.market_map:
                             self.market_map = {}
                             self.price_scales = {}
@@ -76,7 +70,11 @@ class ApiHandler:
     async def get_price_scale(self, symbol: str) -> int:
         """Get price scale with automatic reload on failure"""
         if symbol not in self.price_scales:
-            await self.load_markets(reload=True)
+            try:
+                market = await self.exchange.load_market(symbol)
+                self.price_scales[symbol] = 10 ** market['precision']['price']
+            except:
+                await self.load_markets(reload=True)
         return self.price_scales.get(symbol, 100)
         
     async def get_contract_size(self, symbol: str) -> float:
@@ -100,55 +98,27 @@ class ApiHandler:
         params: Optional[Dict[str, Any]] = None,
         retries: int = 3
     ) -> List[List[float]]:
-        """Fetch OHLCV with comprehensive error handling"""
-        # Ensure markets are loaded
         if not self.market_map:
             await self.load_markets()
         
-        # Validate symbol exists
         if symbol not in self.market_map:
             await self.load_markets(reload=True)
             if symbol not in self.market_map:
-                logger.error(f"Symbol {symbol} not found in market map")
+                logger.error(f"Symbol {symbol} not found")
                 return []
-        
+
         params = params.copy() if params else {}
-        original_limit = limit  # Store for error handling
+        original_limit = limit
 
         # Phemex-specific parameters
         if self.exchange.id == 'phemex':
-            now_ms = int(time.time() * 1000)
-            if since is not None and limit is not None:
-                timeframe_sec = self._timeframe_to_seconds(timeframe)
-                to_time = since + (limit * timeframe_sec * 1000)
-                params['to'] = min(to_time, now_ms)
-            else:
-                params['to'] = now_ms
-
-            # Handle limit adjustment safely - COMPLETELY NEW APPROACH
+            params['to'] = int(time.time() * 1000)
             if limit is not None:
-                # First, ensure limit is a valid integer
                 try:
-                    safe_limit = int(limit)
+                    safe_limit = min(int(limit), 500)
                 except (TypeError, ValueError):
-                    logger.warning(f"Invalid limit type for {symbol}, using default")
                     safe_limit = 500
-                
-                # Get max allowed limit from market data
-                max_limit = 500  # Default safe value
-                try:
-                    market = self.exchange.markets.get(symbol)
-                    if market:
-                        max_limit = self._get_safe_max_limit(market)
-                        # Final type validation
-                        if not isinstance(max_limit, (int, float)):
-                            logger.warning(f"Unexpected max_limit type for {symbol}: {type(max_limit)}")
-                            max_limit = 500
-                except Exception as e:
-                    logger.error(f"Max limit lookup failed for {symbol}: {str(e)}")
-                
-                # Apply safe constraint
-                limit = min(safe_limit, int(max_limit))
+                limit = safe_limit
 
         for attempt in range(retries):
             try:
@@ -157,60 +127,20 @@ class ApiHandler:
                         symbol, timeframe, since, limit, params
                     )
             except BadRequest as e:
-                logger.error(f"BadRequest for {symbol}: {str(e)}")
-                # Special handling for invalid arguments error
-                if "30000" in str(e) and "arguments" in str(e):
-                    logger.info(f"Retrying {symbol} with default parameters after BadRequest")
-                    # Try without any custom parameters
+                if "30000" in str(e):
                     return await self.exchange.fetch_ohlcv(symbol, timeframe, since, limit)
                 raise
             except (NetworkError, ExchangeError, RequestTimeout) as e:
                 if attempt == retries - 1:
-                    logger.error(f"OHLCV failed for {symbol}: {str(e)}")
                     raise
                 wait = 2 ** attempt
-                logger.warning(f"OHLCV attempt {attempt+1} for {symbol} failed: {str(e)} - retrying in {wait}s")
                 await asyncio.sleep(wait)
             except TypeError as e:
-                error_str = str(e)
-                if "'<' not supported" in error_str and "int' and 'dict'" in error_str:
-                    logger.warning(f"TypeError detected for {symbol}: {error_str}")
-                    if self.exchange.id == 'phemex' and original_limit is not None:
-                        logger.info(f"Applying emergency limit fix for {symbol}")
-                        limit = min(original_limit, 500)
-                        continue
-                logger.error(f"Unhandled TypeError for {symbol}: {error_str}")
+                if "'<' not supported" in str(e) and original_limit is not None:
+                    limit = min(original_limit, 500)
+                    continue
                 raise
         return []
-        
-    def _get_safe_max_limit(self, market: Dict[str, Any]) -> int:
-        """Robust limit extraction with multiple fallbacks"""
-        try:
-            # First try standard CCXT structure
-            limits = market.get('limits', {})
-            amount = limits.get('amount', {})
-            max_limit = amount.get('max')
-            
-            # If not found, try exchange-specific field
-            if max_limit is None and 'info' in market:
-                info = market['info']
-                max_limit = info.get('maxOrderQty')
-            
-            # Handle different data types
-            if max_limit is None:
-                return 500
-            elif isinstance(max_limit, dict):
-                logger.debug(f"Found dict max_limit for {market['symbol']}")
-                return 500
-            elif isinstance(max_limit, (int, float)):
-                return int(max_limit)
-            elif isinstance(max_limit, str) and max_limit.isdigit():
-                return int(max_limit)
-                
-        except Exception as e:
-            logger.debug(f"Limit extraction error: {str(e)}")
-            
-        return 500  # Ultimate fallback
         
     async def get_ohlcv(
         self, 
@@ -257,13 +187,13 @@ class ApiHandler:
             logger.error(f"Cancel failed for {order_id}: {str(e)}")
             return None
             
-    async def fetch_positions(self) -> Dict[str, Any]:
+    async def fetch_positions(self) -> List[Dict]:
         try:
             async with self.semaphore:
                 return await self.exchange.fetch_positions()
         except Exception as e:
             logger.error(f"Position fetch failed: {str(e)}")
-            return {}
+            return []
             
     async def fetch_ticker(self, symbol: str) -> Optional[Dict[str, Any]]:
         try:
@@ -276,11 +206,13 @@ class ApiHandler:
     async def fetch_balance(self) -> Dict[str, Any]:
         try:
             async with self.semaphore:
-                # Phemex requires additional parameters
                 params = {}
                 if self.exchange.id == 'phemex':
-                    params['code'] = 'USD'  # Or appropriate currency
+                    params['code'] = 'USD'
                 return await self.exchange.fetch_balance(params)
         except Exception as e:
             logger.error(f"Balance fetch failed: {str(e)}")
             return {}
+            
+    def get_market_id(self, symbol: str) -> str:
+        return self.market_map.get(symbol, symbol)
