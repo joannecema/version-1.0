@@ -1,7 +1,7 @@
 import asyncio
 import logging
-import time  # Imported the time module
-from typing import List, Optional
+import time
+from typing import List, Optional, Dict, Any
 import ccxt.async_support as ccxt
 from ccxt import NetworkError, ExchangeError, RequestTimeout
 
@@ -12,8 +12,8 @@ class ApiHandler:
         self.config = config or {}
         self.testnet = self.config.get("testnet", False)
         self.exchange = self._init_exchange(api_key, api_secret)
-        self.market_map = {}
-        self.price_scales = {}
+        self.market_map: Dict[str, str] = {}
+        self.price_scales: Dict[str, int] = {}
         self.last_market_load = 0
         self.semaphore = asyncio.Semaphore(5)  # Rate limiting
         
@@ -47,25 +47,65 @@ class ApiHandler:
             except Exception as e:
                 logger.error("Market load failed: %s", e)
                 
-    async def get_price_scale(self, symbol):
+    async def get_price_scale(self, symbol: str) -> int:
         """Get price scale factor for Phemex (10^precision)"""
         if symbol not in self.price_scales:
             await self.load_markets(reload=True)
         return self.price_scales.get(symbol, 100)  # Default to 2 decimals
         
-    async def get_contract_size(self, symbol):
+    async def get_contract_size(self, symbol: str) -> float:
         """Get contract size for position sizing"""
         await self.load_markets()
         market = self.exchange.markets.get(symbol)
-        return market.get("contractSize", 1) if market else 1
+        return market.get("contractSize", 1.0) if market else 1.0
         
-    async def fetch_ohlcv_robust(self, symbol, timeframe="1m", limit=100, retries=3):
-        """Fetch OHLCV with retry logic"""
+    def _timeframe_to_seconds(self, timeframe: str) -> int:
+        """Convert timeframe string to seconds"""
+        units = {
+            's': 1,
+            'm': 60,
+            'h': 3600,
+            'd': 86400,
+            'w': 604800,
+        }
+        unit = timeframe[-1]
+        value = int(timeframe[:-1])
+        return value * units[unit]
+        
+    async def fetch_ohlcv_robust(
+        self,
+        symbol: str,
+        timeframe: str = "1m",
+        since: Optional[int] = None,
+        limit: Optional[int] = None,
+        params: Optional[Dict[str, Any]] = None,
+        retries: int = 3
+    ) -> List[List[float]]:
+        """Fetch OHLCV with retry logic and Phemex parameter handling"""
+        params = params or {}
+        exchange_id = self.exchange.id
+        
+        # Handle Phemex-specific parameters
+        if exchange_id == 'phemex' and since is not None:
+            # Calculate 'to' timestamp (current time if limit not provided)
+            to_timestamp = int(time.time())
+            
+            if limit is not None:
+                # Calculate end time based on timeframe and limit
+                timeframe_sec = self._timeframe_to_seconds(timeframe)
+                to_timestamp = int(since / 1000) + (limit * timeframe_sec)
+            
+            params['to'] = to_timestamp
+        
         for attempt in range(retries):
             try:
                 async with self.semaphore:
                     return await self.exchange.fetch_ohlcv(
-                        symbol, timeframe, limit=limit
+                        symbol, 
+                        timeframe, 
+                        since=since, 
+                        limit=limit, 
+                        params=params
                     )
             except (NetworkError, ExchangeError, RequestTimeout) as e:
                 if attempt == retries - 1:
@@ -76,15 +116,30 @@ class ApiHandler:
                 await asyncio.sleep(wait)
         return []
         
-    async def get_ohlcv(self, symbol: str, timeframe: str = '1m', limit: int = 20) -> List[List[float]]:
-        """Alias for fetch_ohlcv_robust with default parameters"""
+    async def get_ohlcv(
+        self, 
+        symbol: str, 
+        timeframe: str = '1m', 
+        limit: int = 20,
+        since: Optional[int] = None
+    ) -> List[List[float]]:
+        """Get OHLCV data with robust fetching"""
         return await self.fetch_ohlcv_robust(
             symbol=symbol,
             timeframe=timeframe,
+            since=since,
             limit=limit
         )
         
-    async def place_order(self, symbol, side, order_type, quantity, price_ep=None, ioc_timeout=1000):
+    async def place_order(
+        self, 
+        symbol: str, 
+        side: str, 
+        order_type: str, 
+        quantity: float, 
+        price_ep: Optional[int] = None, 
+        ioc_timeout: int = 1000
+    ) -> Dict[str, Any]:
         """Place order with proper Phemex parameters"""
         try:
             params = {}
@@ -107,15 +162,16 @@ class ApiHandler:
                          symbol, order_type, side, price_ep, e)
             return {"status": "error", "error": str(e)}
             
-    async def cancel_order(self, symbol, order_id):
+    async def cancel_order(self, symbol: str, order_id: str) -> Optional[Dict[str, Any]]:
         """Cancel order on exchange"""
         try:
             async with self.semaphore:
                 return await self.exchange.cancel_order(order_id, symbol)
         except Exception as e:
             logger.error("Cancel failed for %s: %s", order_id, e)
+            return None
             
-    async def fetch_positions(self):
+    async def fetch_positions(self) -> Dict[str, Any]:
         """Fetch open positions from exchange"""
         try:
             async with self.semaphore:
@@ -124,7 +180,7 @@ class ApiHandler:
             logger.error("Position fetch failed: %s", e)
             return {}
             
-    async def fetch_ticker(self, symbol):
+    async def fetch_ticker(self, symbol: str) -> Optional[Dict[str, Any]]:
         """Fetch ticker data"""
         try:
             async with self.semaphore:
@@ -133,7 +189,7 @@ class ApiHandler:
             logger.error("Ticker fetch failed for %s: %s", symbol, e)
             return None
             
-    async def fetch_balance(self):
+    async def fetch_balance(self) -> Dict[str, Any]:
         """Fetch account balance"""
         try:
             async with self.semaphore:
