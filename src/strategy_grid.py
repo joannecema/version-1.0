@@ -1,6 +1,7 @@
 # strategy_grid.py
 import logging
 import numpy as np
+import asyncio
 from typing import Optional, Tuple
 
 log = logging.getLogger("GridStrategy")
@@ -32,17 +33,16 @@ class GridStrategy:
                 return None
                 
             # Get OHLCV and ticker in parallel
-            ohlcv_future = self.api.fetch_ohlcv_with_retry(
+            ohlcv_future = self.api.get_ohlcv(
                 symbol, 
                 self.timeframe, 
-                limit=self.lookback + 1,
-                max_retries=3
+                limit=self.lookback + 1
             )
-            ticker_future = self.api.fetch_ticker_with_retry(symbol, max_retries=3)
+            ticker_future = self.api.fetch_ticker(symbol)
             
             ohlcv, ticker = await asyncio.gather(ohlcv_future, ticker_future)
             
-            if not ohlcv or not ticker:
+            if not ohlcv or len(ohlcv) < 2 or not ticker:
                 return None
 
             # Calculate average price
