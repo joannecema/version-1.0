@@ -3,7 +3,7 @@ import logging
 import time
 from typing import List, Optional, Dict, Any
 import ccxt.async_support as ccxt
-from ccxt import NetworkError, ExchangeError, RequestTimeout
+from ccxt import NetworkError, ExchangeError, RequestTimeout, BadRequest
 
 logger = logging.getLogger("ApiHandler")
 
@@ -83,40 +83,24 @@ class ApiHandler:
         retries: int = 3
     ) -> List[List[float]]:
         """Fetch OHLCV bars with retry logic and correct Phemex parameter handling."""
-        # Ensure markets are loaded so market_map is populated
+        # Ensure markets are loaded so exchange.markets exists
         if not self.market_map:
             await self.load_markets()
-
-        # Translate symbol to Phemex market ID if available
-        market_id = self.market_map.get(symbol, symbol)
+        
         params = params.copy() if params else {}
 
-        # FIX: Always add 'to' parameter for Phemex to prevent API errors
-        if self.exchange.id == 'phemex':
-            # Default to current time in seconds
-            to_timestamp = int(time.time())
-            
-            # Calculate end time if since and limit are provided
-            if since is not None and limit is not None:
-                timeframe_sec = self._timeframe_to_seconds(timeframe)
-                # Convert since from ms to seconds and add duration
-                to_timestamp = int(since / 1000) + (limit * timeframe_sec)
-            
-            params['to'] = to_timestamp
-
-        # Always pass 'limit' inside params instead of as positional
+        # Always pass 'limit' via params, not as positional
         if limit is not None:
             params['limit'] = limit
 
+        # Do NOT inject a 'to' timestamp; let CCXT handle since+limit
         for attempt in range(retries):
             try:
                 async with self.semaphore:
-                    # Note: we pass since=None and limit=None positionally,
-                    # and put both into params to avoid Phemex ccxt bug
                     return await self.exchange.fetch_ohlcv(
-                        market_id,
+                        symbol,
                         timeframe,
-                        since=None,
+                        since=since,
                         limit=None,
                         params=params
                     )
@@ -130,6 +114,10 @@ class ApiHandler:
                     attempt + 1, symbol, e, wait
                 )
                 await asyncio.sleep(wait)
+            except BadRequest as e:
+                # BadRequest likely means wrong symbol or args—stop retrying
+                logger.error("BadRequest for %s: %s", symbol, e)
+                raise
         return []
         
     async def get_ohlcv(
