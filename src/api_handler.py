@@ -98,17 +98,13 @@ class ApiHandler:
                 logger.error("Symbol %s not found in market map", symbol)
                 return []
         
-        market_id = self.market_map[symbol]
         params = params.copy() if params else {}
 
-        # Always pass 'limit' via params, not as positional
-        if limit is not None:
-            params['limit'] = limit
-
-        # Only set 'to' parameter for Phemex when 'since' is provided
-        if self.exchange.id == 'phemex' and since is not None:
+        # Always set 'to' parameter for Phemex - required by their API
+        if self.exchange.id == 'phemex':
             now_ms = int(time.time() * 1000)
-            if limit is not None:
+            # Only compute custom 'to' if both since and limit are provided
+            if since is not None and limit is not None:
                 timeframe_sec = self._timeframe_to_seconds(timeframe)
                 to_time = since + (limit * timeframe_sec * 1000)
                 # Clamp to current time to prevent future timestamp errors
@@ -116,16 +112,17 @@ class ApiHandler:
                     to_time = now_ms
                 params['to'] = to_time
             else:
+                # Always set 'to' to current time if not computed
                 params['to'] = now_ms
 
         for attempt in range(retries):
             try:
                 async with self.semaphore:
                     return await self.exchange.fetch_ohlcv(
-                        market_id,
+                        symbol,
                         timeframe,
                         since=since,
-                        limit=None,  # Pass limit via params only
+                        limit=limit,
                         params=params
                     )
             except BadRequest as e:
