@@ -1,121 +1,71 @@
-# src/volatility_regime_filter.py
-
 import logging
-import time                                 # ← for timestamp calculations
-from typing import Optional                 # ← for the return‐type annotation
-import numpy as np
+import asyncio
+from ccxt import RateLimitExceeded
 
-log = logging.getLogger("VRF")
-
+logger = logging.getLogger(__name__)
 
 class VolatilityRegimeFilter:
-    def __init__(self, api: "ApiHandler", cfg: dict):
+    def __init__(self, api, lookback_period=24, threshold=0.05):
         self.api = api
-        self.cfg = cfg
-        self.timeframe = cfg.get("timeframe", "1m")
-        self.lookback = int(cfg.get("lookback", 10))
-        self.threshold = cfg.get("threshold") or cfg.get("volatility_threshold_atr", 0.02)
-        self.min_data_points = 5  # Minimum candles needed for calculation
-
-    async def allow_trading(self, symbol: str) -> bool:
+        self.lookback_period = lookback_period
+        self.threshold = threshold
+        
+    async def allow_trading(self, symbol):
         """
-        Evaluate if trading is permitted based on volatility, by fetching
-        OHLCV with both 'since' and 'limit' so that Phemex does not complain
-        about a missing 'to' parameter.
+        Determine if trading should be allowed based on volatility regime
+        with rate limit handling for Phemex API
         """
-        try:
-            # 1) Compute how many candles we need (lookback + 5 as buffer).
-            limit = self.lookback + 5
-
-            # 2) Compute 'since' in milliseconds (so Phemex sees a valid time window).
-            since = await self._calculate_since_timestamp(symbol)
-            if since is None:
-                log.debug(f"[VRF] Could not calculate 'since' for {symbol}")
-                return False
-
-            # 3) Under Phemex, CCXT’s fetch_ohlcv requires both a 'from' (since) and an implicit 'to'.
-            #    We grab the same semaphore that ApiHandler uses, to avoid too‐many‐requests.
-            async with self.api.semaphore:
+        max_retries = 5
+        base_delay = 1.5  # seconds
+        
+        for attempt in range(max_retries):
+            try:
+                # Fetch OHLCV data with rate limit protection
                 ohlcv = await self.api.exchange.fetch_ohlcv(
                     symbol,
-                    self.timeframe,
-                    since,
-                    limit,
+                    timeframe='1h',
+                    limit=self.lookback_period
                 )
-
-            if not ohlcv:
-                log.debug(f"[VRF] No OHLCV data for {symbol}")
+                
+                # Calculate volatility if data retrieval successful
+                if len(ohlcv) < 2:
+                    logger.warning(f"Insufficient data for {symbol}")
+                    return False
+                
+                # Calculate price changes
+                price_changes = []
+                for i in range(1, len(ohlcv)):
+                    prev_close = ohlcv[i-1][4]  # previous close
+                    current_range = ohlcv[i][2] - ohlcv[i][3]  # current high-low
+                    if prev_close > 0:
+                        price_changes.append(current_range / prev_close)
+                
+                if not price_changes:
+                    return False
+                
+                # Calculate average volatility
+                avg_volatility = sum(price_changes) / len(price_changes)
+                logger.info(f"{symbol} volatility: {avg_volatility:.4f}")
+                
+                # Determine trading allowance
+                return avg_volatility >= self.threshold
+                
+            except RateLimitExceeded:
+                if attempt < max_retries - 1:
+                    # Exponential backoff with jitter
+                    delay = base_delay * (2 ** attempt) + (0.1 * attempt)
+                    logger.warning(
+                        f"Rate limit exceeded for {symbol}. "
+                        f"Retry {attempt+1}/{max_retries} in {delay:.1f}s"
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                else:
+                    logger.error(
+                        f"Rate limit exceeded for {symbol} after {max_retries} attempts"
+                    )
+                    return False
+                    
+            except Exception as e:
+                logger.error(f"Error processing {symbol}: {str(e)}", exc_info=True)
                 return False
-
-            # 4) Ensure we have at least the minimum candles before proceeding.
-            if len(ohlcv) < self.min_data_points:
-                log.debug(f"[VRF] Insufficient data for {symbol} (only {len(ohlcv)} candles)")
-                return False
-
-            # 5) Extract valid close prices out of each candle.
-            closes = []
-            for candle in ohlcv:
-                # CCXT OHLCV format is [ timestamp, open, high, low, close, volume ]
-                if len(candle) >= 5:
-                    close_price = candle[4]
-                    if isinstance(close_price, (int, float)) and close_price > 0:
-                        closes.append(close_price)
-
-            if len(closes) < 2:
-                log.debug(f"[VRF] Not enough valid closes for {symbol}")
-                return False
-
-            # 6) Compute absolute returns between consecutive closes.
-            arr = np.array(closes)
-            prev = arr[:-1]
-            curr = arr[1:]
-
-            # Mask out any zero‐previous‐close to avoid division by zero.
-            mask = prev > 0
-            if not np.any(mask):
-                log.debug(f"[VRF] All previous closes are zero for {symbol}")
-                return False
-
-            returns = np.abs((curr[mask] - prev[mask]) / prev[mask])
-            if returns.size == 0:
-                log.debug(f"[VRF] No valid returns for {symbol}")
-                return False
-
-            # 7) Use the median return as a robust volatility estimate.
-            volatility = np.median(returns)
-
-            if self.threshold is None:
-                log.error("[VRF] Volatility threshold not configured")
-                return False
-
-            allowed = volatility < self.threshold
-            log.debug(
-                f"[VRF] {symbol} volatility={volatility:.5f}, threshold={self.threshold} → allowed={allowed}"
-            )
-            return allowed
-
-        except Exception as e:
-            log.error(f"[VRF] Error processing {symbol}: {e}", exc_info=True)
-            return False
-
-    async def _calculate_since_timestamp(self, symbol: str) -> Optional[int]:
-        """
-        Calculate 'since' timestamp (in ms) so that Phemex has a 'from'.
-        CCXT will automatically fill in 'to' = current time.
-        """
-        try:
-            # 1) Now in milliseconds
-            current_time_ms = int(time.time() * 1000)
-
-            # 2) Convert timeframe (e.g. "1m", "5m") into seconds
-            #    Assumes ApiHandler implements _timeframe_to_seconds(...)
-            timeframe_seconds = self.api._timeframe_to_seconds(self.timeframe)
-            timeframe_ms = timeframe_seconds * 1000
-
-            # 3) We need (lookback + 5) candles worth of history.
-            needed_ms = (self.lookback + 5) * timeframe_ms
-            return current_time_ms - needed_ms
-
-        except Exception as e:
-            log.error(f"[VRF] Error calculating since timestamp for {symbol}: {e}")
-            return None
