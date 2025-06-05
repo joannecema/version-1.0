@@ -1,8 +1,8 @@
 # src/volatility_regime_filter.py
 
 import logging
-import time                                # ← Needed for timestamp calculations
-from typing import Optional                # ← Needed for the return annotation
+import time                                 # ← for timestamp calculations
+from typing import Optional                 # ← for the return‐type annotation
 import numpy as np
 
 log = logging.getLogger("VRF")
@@ -19,24 +19,40 @@ class VolatilityRegimeFilter:
 
     async def allow_trading(self, symbol: str) -> bool:
         """
-        Evaluate if trading is permitted based on volatility
-        with robust error handling and performance optimizations
+        Evaluate if trading is permitted based on volatility, by fetching
+        OHLCV with both 'since' and 'limit' so that Phemex does not complain
+        about a missing 'to' parameter.
         """
         try:
-            # Fetch OHLCV data (we ask for lookback + 5 candles to cover gaps)
+            # 1) Compute how many candles we need (lookback + 5 as buffer).
             limit = self.lookback + 5
-            ohlcv = await self.api.get_ohlcv(symbol, self.timeframe, limit)
+
+            # 2) Compute 'since' in milliseconds (so Phemex sees a valid time window).
+            since = await self._calculate_since_timestamp(symbol)
+            if since is None:
+                log.debug(f"[VRF] Could not calculate 'since' for {symbol}")
+                return False
+
+            # 3) Under Phemex, CCXT’s fetch_ohlcv requires both a 'from' (since) and an implicit 'to'.
+            #    We grab the same semaphore that ApiHandler uses, to avoid too‐many‐requests.
+            async with self.api.semaphore:
+                ohlcv = await self.api.exchange.fetch_ohlcv(
+                    symbol,
+                    self.timeframe,
+                    since,
+                    limit,
+                )
 
             if not ohlcv:
                 log.debug(f"[VRF] No OHLCV data for {symbol}")
                 return False
 
-            # Validate we have at least the minimum number of candles
+            # 4) Ensure we have at least the minimum candles before proceeding.
             if len(ohlcv) < self.min_data_points:
                 log.debug(f"[VRF] Insufficient data for {symbol} (only {len(ohlcv)} candles)")
                 return False
 
-            # Extract valid closing prices
+            # 5) Extract valid close prices out of each candle.
             closes = []
             for candle in ohlcv:
                 # CCXT OHLCV format is [ timestamp, open, high, low, close, volume ]
@@ -49,12 +65,12 @@ class VolatilityRegimeFilter:
                 log.debug(f"[VRF] Not enough valid closes for {symbol}")
                 return False
 
-            # Calculate absolute returns using numpy
+            # 6) Compute absolute returns between consecutive closes.
             arr = np.array(closes)
             prev = arr[:-1]
             curr = arr[1:]
 
-            # Mask out any zero‐previous‐close to avoid division by zero
+            # Mask out any zero‐previous‐close to avoid division by zero.
             mask = prev > 0
             if not np.any(mask):
                 log.debug(f"[VRF] All previous closes are zero for {symbol}")
@@ -65,7 +81,7 @@ class VolatilityRegimeFilter:
                 log.debug(f"[VRF] No valid returns for {symbol}")
                 return False
 
-            # Use median return as a robust volatility estimate
+            # 7) Use the median return as a robust volatility estimate.
             volatility = np.median(returns)
 
             if self.threshold is None:
@@ -84,19 +100,19 @@ class VolatilityRegimeFilter:
 
     async def _calculate_since_timestamp(self, symbol: str) -> Optional[int]:
         """
-        Calculate since timestamp for efficient data fetching.
-        (This method is no longer used by allow_trading, kept here in case you want to reintroduce it.)
+        Calculate 'since' timestamp (in ms) so that Phemex has a 'from'.
+        CCXT will automatically fill in 'to' = current time.
         """
         try:
-            # Current time in milliseconds
+            # 1) Now in milliseconds
             current_time_ms = int(time.time() * 1000)
 
-            # Convert timeframe (e.g. "1m", "5m") to seconds
-            # Assumes ApiHandler has a helper _timeframe_to_seconds(...)
+            # 2) Convert timeframe (e.g. "1m", "5m") into seconds
+            #    Assumes ApiHandler implements _timeframe_to_seconds(...)
             timeframe_seconds = self.api._timeframe_to_seconds(self.timeframe)
             timeframe_ms = timeframe_seconds * 1000
 
-            # We wanted (lookback + 5) candles' worth of history
+            # 3) We need (lookback + 5) candles worth of history.
             needed_ms = (self.lookback + 5) * timeframe_ms
             return current_time_ms - needed_ms
 
