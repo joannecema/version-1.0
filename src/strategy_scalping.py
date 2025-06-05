@@ -1,71 +1,218 @@
+# api_handler.py
+import asyncio
 import logging
-from typing import Optional, Tuple
+import time
+from typing import List, Optional, Dict, Any
+import ccxt.async_support as ccxt
+from ccxt import NetworkError, ExchangeError, RequestTimeout, BadRequest
 
-log = logging.getLogger("Scalping")
+logger = logging.getLogger("ApiHandler")
 
-class ScalpingStrategy:
-    def __init__(self, api, config: dict, tracker, executor) -> None:
-        self.api = api
-        self.config = config
-        self.tracker = tracker
-        self.executor = executor
+class ApiHandler:
+    def __init__(self, api_key, api_secret, config=None):
+        self.config = config or {}
+        self.testnet = self.config.get("testnet", False)
+        self.exchange = self._init_exchange(api_key, api_secret)
+        self.market_map: Dict[str, str] = {}
+        self.price_scales: Dict[str, int] = {}
+        self.last_market_load = 0
+        self.semaphore = asyncio.Semaphore(10)  # Increased concurrency
+        self.market_load_lock = asyncio.Lock()
+       
+    def _init_exchange(self, api_key, api_secret):
+        params = {
+            "apiKey": api_key,
+            "secret": api_secret,
+            "enableRateLimit": True,
+            "options": {
+                "defaultType": self.config.get("default_type", "swap"),
+                "adjustForTimeDifference": True,
+            }
+        }
+        if self.testnet:
+            params["urls"] = {"api": "https://testnet-api.phemex.com"}
+        return ccxt.phemex(params)
+        
+    async def load_markets(self, reload=False):
+        """Load markets with robust error handling for precision data"""
+        current_time = time.time()
+        if reload or not self.market_map or (current_time - self.last_market_load) > 3600:
+            async with self.market_load_lock:
+                if reload or not self.market_map or (current_time - self.last_market_load) > 3600:
+                    try:
+                        markets = await self.exchange.load_markets()
+                        self.market_map = {}
+                        self.price_scales = {}
+                        
+                        for symbol, market in markets.items():
+                            try:
+                                self.market_map[symbol] = market["id"]
+                                precision = market.get("precision", {})
+                                price_precision = precision.get("price")
+                                
+                                if price_precision is None:
+                                    self.price_scales[symbol] = 100
+                                elif isinstance(price_precision, (int, float)):
+                                    self.price_scales[symbol] = 10 ** int(price_precision)
+                                else:
+                                    self.price_scales[symbol] = 100
+                            except Exception:
+                                self.price_scales[symbol] = 100
+                        
+                        self.last_market_load = current_time
+                        logger.info(f"Loaded {len(markets)} markets")
+                    except Exception as e:
+                        logger.error(f"Market load failed: {str(e)}")
+                        if not self.market_map:
+                            self.market_map = {}
+                            self.price_scales = {}
+                
+    async def get_price_scale(self, symbol: str) -> int:
+        """Get price scale with automatic reload on failure"""
+        if symbol not in self.price_scales:
+            try:
+                market = await self.exchange.load_market(symbol)
+                self.price_scales[symbol] = 10 ** market['precision']['price']
+            except:
+                await self.load_markets(reload=True)
+        return self.price_scales.get(symbol, 100)
+        
+    async def get_contract_size(self, symbol: str) -> float:
+        """Get contract size with fallback"""
+        await self.load_markets()
+        market = self.exchange.markets.get(symbol)
+        return market.get("contractSize", 1.0) if market else 1.0
+        
+    def _timeframe_to_seconds(self, timeframe: str) -> int:
+        units = {'s': 1, 'm': 60, 'h': 3600, 'd': 86400, 'w': 604800}
+        unit = timeframe[-1]
+        value = int(timeframe[:-1])
+        return value * units.get(unit, 1)
+        
+    async def fetch_ohlcv_robust(
+        self,
+        symbol: str,
+        timeframe: str = "1m",
+        since: Optional[int] = None,
+        limit: Optional[int] = None,
+        params: Optional[Dict[str, Any]] = None,
+        retries: int = 3
+    ) -> List[List[float]]:
+        if not self.market_map:
+            await self.load_markets()
+        
+        if symbol not in self.market_map:
+            await self.load_markets(reload=True)
+            if symbol not in self.market_map:
+                logger.error(f"Symbol {symbol} not found")
+                return []
 
-        self.volume_multiplier = config.get("scalping_volume_multiplier", 1.5)
-        self.momentum_period = config.get("scalping_momentum_period", 3)
-        self.idle_exit_minutes = config.get("idle_exit_minutes", 5)
-        self.min_roi = config.get("min_roi_threshold", 0.002)
-        self.trailing_enabled = config.get("trailing_stop_enabled", True)
-        self.strategy_name = "scalping"
+        params = params.copy() if params else {}
+        original_limit = limit
 
-    async def check_signal(self, symbol: str) -> Optional[Tuple[str, float]]:
+        # Phemex-specific parameters
+        if self.exchange.id == 'phemex':
+            params['to'] = int(time.time() * 1000)
+            if limit is not None:
+                try:
+                    safe_limit = min(int(limit), 500)
+                except (TypeError, ValueError):
+                    safe_limit = 500
+                limit = safe_limit
+
+        for attempt in range(retries):
+            try:
+                async with self.semaphore:
+                    return await self.exchange.fetch_ohlcv(
+                        symbol, timeframe, since, limit, params
+                    )
+            except BadRequest as e:
+                if "30000" in str(e):
+                    return await self.exchange.fetch_ohlcv(symbol, timeframe, since, limit)
+                raise
+            except (NetworkError, ExchangeError, RequestTimeout) as e:
+                if attempt == retries - 1:
+                    raise
+                wait = 2 ** attempt
+                await asyncio.sleep(wait)
+            except TypeError as e:
+                if "'<' not supported" in str(e) and original_limit is not None:
+                    limit = min(original_limit, 500)
+                    continue
+                raise
+        return []
+        
+    async def get_ohlcv(
+        self, 
+        symbol: str, 
+        timeframe: str = '1m', 
+        limit: int = 20,
+        since: Optional[int] = None
+    ) -> List[List[float]]:
+        return await self.fetch_ohlcv_robust(
+            symbol=symbol,
+            timeframe=timeframe,
+            since=since,
+            limit=limit
+        )
+        
+    async def place_order(
+        self, 
+        symbol: str, 
+        side: str, 
+        order_type: str, 
+        quantity: float, 
+        price_ep: Optional[int] = None, 
+        ioc_timeout: int = 1000
+    ) -> Dict[str, Any]:
         try:
-            ohlcv = await self.api.fetch_ohlcv(symbol, timeframe="1m", limit=self.momentum_period + 1)
+            params = {}
+            if price_ep:
+                params["priceEp"] = price_ep
+            if ioc_timeout and order_type == "limit":
+                params["timeInForce"] = "IOC"
+            async with self.semaphore:
+                return await self.exchange.create_order(
+                    symbol, order_type, side, quantity, None, params
+                )
         except Exception as e:
-            log.error(f"[{self.strategy_name.upper()}] ❌ Failed to fetch OHLCV for {symbol}: {e}")
-            return None
-
-        if not ohlcv or len(ohlcv) < self.momentum_period + 1:
-            log.warning(f"[{self.strategy_name.upper()}] ⚠️ Not enough OHLCV for {symbol} (got {len(ohlcv)})")
-            return None
-
-        close_prices = [bar[4] for bar in ohlcv if isinstance(bar[4], (float, int))]
-        if len(close_prices) < 2:
-            log.warning(f"[{self.strategy_name.upper()}] ⚠️ Invalid close prices for {symbol}")
-            return None
-
-        momentum = close_prices[-1] - close_prices[0]
-        percent_change = (momentum / close_prices[0]) if close_prices[0] else 0
-
-        if abs(percent_change) < self.min_roi:
-            log.debug(f"[{self.strategy_name.upper()}] ❌ No momentum for {symbol} (Δ={percent_change:.5f})")
-            return None
-
+            logger.error(f"Order failed: {symbol}, {order_type}, {side}, {price_ep} - {str(e)}")
+            return {"status": "error", "error": str(e)}
+            
+    async def cancel_order(self, symbol: str, order_id: str) -> Optional[Dict[str, Any]]:
         try:
-            vol_now = ohlcv[-1][5]
-            vol_prev = sum([bar[5] for bar in ohlcv[:-1]]) / len(ohlcv[:-1])
+            async with self.semaphore:
+                return await self.exchange.cancel_order(order_id, symbol)
         except Exception as e:
-            log.warning(f"[{self.strategy_name.upper()}] ⚠️ Volume error for {symbol}: {e}")
+            logger.error(f"Cancel failed for {order_id}: {str(e)}")
             return None
-
-        if vol_now < vol_prev * self.volume_multiplier:
-            log.debug(f"[{self.strategy_name.upper()}] ❌ Volume low on {symbol} ({vol_now:.2f} < {vol_prev * self.volume_multiplier:.2f})")
-            return None
-
-        side = "buy" if percent_change > 0 else "sell"
-
+            
+    async def fetch_positions(self) -> List[Dict]:
         try:
-            if await self.tracker.has_open_position(symbol):
-                log.info(f"[{self.strategy_name.upper()}] 🔄 Skipping {symbol} — already in position")
-                return None
-
-            capital = await self.tracker.get_available_usdt()
-            size = self.executor._calculate_trade_size(capital, close_prices[-1])
-            if size <= 0:
-                log.warning(f"[{self.strategy_name.upper()}] ⚠️ Invalid size for {symbol}")
-                return None
+            async with self.semaphore:
+                return await self.exchange.fetch_positions()
         except Exception as e:
-            log.error(f"[{self.strategy_name.upper()}] ❌ Size calc failed for {symbol}: {e}")
+            logger.error(f"Position fetch failed: {str(e)}")
+            return []
+            
+    async def fetch_ticker(self, symbol: str) -> Optional[Dict[str, Any]]:
+        try:
+            async with self.semaphore:
+                return await self.exchange.fetch_ticker(symbol)
+        except Exception as e:
+            logger.error(f"Ticker fetch failed for {symbol}: {str(e)}")
             return None
-
-        log.info(f"[{self.strategy_name.upper()}] ✅ Signal for {symbol} | Side={side.upper()} | Δ={percent_change:.4f} | Size={size}")
-        return side, size
+            
+    async def fetch_balance(self) -> Dict[str, Any]:
+        try:
+            async with self.semaphore:
+                params = {}
+                if self.exchange.id == 'phemex':
+                    params['code'] = 'USD'
+                return await self.exchange.fetch_balance(params)
+        except Exception as e:
+            logger.error(f"Balance fetch failed: {str(e)}")
+            return {}
+            
+    def get_market_id(self, symbol: str) -> str:
+        return self.market_map.get(symbol, symbol)
