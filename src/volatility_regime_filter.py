@@ -1,7 +1,12 @@
+# src/volatility_regime_filter.py
+
 import logging
+import time                                # ← Needed for timestamp calculations
+from typing import Optional                # ← Needed for the return annotation
 import numpy as np
 
 log = logging.getLogger("VRF")
+
 
 class VolatilityRegimeFilter:
     def __init__(self, api: "ApiHandler", cfg: dict):
@@ -18,86 +23,83 @@ class VolatilityRegimeFilter:
         with robust error handling and performance optimizations
         """
         try:
-            # Calculate since parameter to get exactly needed candles
-            since = await self._calculate_since_timestamp(symbol)
-            
-            # Fetch OHLCV data with calculated since parameter
-            ohlcv = await self.api.get_ohlcv(
-                symbol, 
-                self.timeframe, 
-                limit=self.lookback + 5,  # Extra buffer for data gaps
-                since=since
-            )
-            
+            # Fetch OHLCV data (we ask for lookback + 5 candles to cover gaps)
+            limit = self.lookback + 5
+            ohlcv = await self.api.get_ohlcv(symbol, self.timeframe, limit)
+
             if not ohlcv:
                 log.debug(f"[VRF] No OHLCV data for {symbol}")
                 return False
-                
-            # Validate data structure
+
+            # Validate we have at least the minimum number of candles
             if len(ohlcv) < self.min_data_points:
                 log.debug(f"[VRF] Insufficient data for {symbol} (only {len(ohlcv)} candles)")
                 return False
-                
-            # Extract and validate closing prices
+
+            # Extract valid closing prices
             closes = []
             for candle in ohlcv:
-                if len(candle) >= 5:  # Ensure candle has close price
+                # CCXT OHLCV format is [ timestamp, open, high, low, close, volume ]
+                if len(candle) >= 5:
                     close_price = candle[4]
                     if isinstance(close_price, (int, float)) and close_price > 0:
                         closes.append(close_price)
-            
+
             if len(closes) < 2:
                 log.debug(f"[VRF] Not enough valid closes for {symbol}")
                 return False
 
-            # Calculate returns using vectorized operations
-            closes_array = np.array(closes)
-            prev_closes = closes_array[:-1]
-            current_closes = closes_array[1:]
-            
-            # Avoid division by zero
-            valid_mask = prev_closes > 0
-            if not np.any(valid_mask):
+            # Calculate absolute returns using numpy
+            arr = np.array(closes)
+            prev = arr[:-1]
+            curr = arr[1:]
+
+            # Mask out any zero‐previous‐close to avoid division by zero
+            mask = prev > 0
+            if not np.any(mask):
                 log.debug(f"[VRF] All previous closes are zero for {symbol}")
                 return False
-                
-            returns = np.abs((current_closes[valid_mask] - prev_closes[valid_mask]) / 
-                             prev_closes[valid_mask])
-            
-            if len(returns) == 0:
+
+            returns = np.abs((curr[mask] - prev[mask]) / prev[mask])
+            if returns.size == 0:
                 log.debug(f"[VRF] No valid returns for {symbol}")
                 return False
-                
-            # Calculate volatility as median to reduce outlier impact
+
+            # Use median return as a robust volatility estimate
             volatility = np.median(returns)
-            
+
             if self.threshold is None:
                 log.error("[VRF] Volatility threshold not configured")
                 return False
 
             allowed = volatility < self.threshold
-            log.debug(f"[VRF] {symbol} volatility={volatility:.5f}, threshold={self.threshold} → allowed={allowed}")
+            log.debug(
+                f"[VRF] {symbol} volatility={volatility:.5f}, threshold={self.threshold} → allowed={allowed}"
+            )
             return allowed
-            
+
         except Exception as e:
             log.error(f"[VRF] Error processing {symbol}: {e}", exc_info=True)
             return False
-            
+
     async def _calculate_since_timestamp(self, symbol: str) -> Optional[int]:
-        """Calculate since timestamp for efficient data fetching"""
+        """
+        Calculate since timestamp for efficient data fetching.
+        (This method is no longer used by allow_trading, kept here in case you want to reintroduce it.)
+        """
         try:
-            # Get current time in milliseconds
+            # Current time in milliseconds
             current_time_ms = int(time.time() * 1000)
-            
-            # Calculate timeframe in milliseconds
+
+            # Convert timeframe (e.g. "1m", "5m") to seconds
+            # Assumes ApiHandler has a helper _timeframe_to_seconds(...)
             timeframe_seconds = self.api._timeframe_to_seconds(self.timeframe)
             timeframe_ms = timeframe_seconds * 1000
-            
-            # Calculate needed timeframe
-            needed_timeframe = (self.lookback + 5) * timeframe_ms
-            
-            # Return start timestamp
-            return current_time_ms - needed_timeframe
+
+            # We wanted (lookback + 5) candles' worth of history
+            needed_ms = (self.lookback + 5) * timeframe_ms
+            return current_time_ms - needed_ms
+
         except Exception as e:
             log.error(f"[VRF] Error calculating since timestamp for {symbol}: {e}")
             return None
