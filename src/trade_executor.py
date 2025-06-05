@@ -1,11 +1,10 @@
-# trade_executor.py (Async Version)
+# trade_executor.py
 import asyncio
 import logging
 import time
+import random
 import hashlib
 from collections import deque
-from abc import ABC, abstractmethod
-from typing import Dict, Optional, Tuple
 
 logger = logging.getLogger("TradeExecutor")
 
@@ -29,6 +28,7 @@ class Order:
         self.state = OrderState.PENDING
         self.timestamp = time.time()
         self.last_update = time.time()
+        self.exchange_order_id = None
         
     def _generate_id(self):
         unique_str = f"{time.time_ns()}-{random.randint(0, 1000000)}"
@@ -54,12 +54,10 @@ class AsyncTradeExecutor:
         self._monitor_task = None
         
     async def start(self):
-        """Start order processing and monitoring tasks"""
         self._processor_task = asyncio.create_task(self._process_orders())
         self._monitor_task = asyncio.create_task(self._monitor_orders())
         
     async def stop(self):
-        """Gracefully shutdown executor"""
         self._stop_event.set()
         await asyncio.gather(
             self._processor_task,
@@ -69,7 +67,6 @@ class AsyncTradeExecutor:
         
     async def execute_order(self, symbol, side, quantity, price=None, 
                           price_validation=True, strategy_id=""):
-        """Submit and execute an order asynchronously"""
         order = Order(
             symbol=symbol,
             side=side,
@@ -82,8 +79,13 @@ class AsyncTradeExecutor:
         await self.order_queue.put(order)
         return await self._wait_for_order_completion(order.order_id)
         
+    async def calculate_risk_adjusted_size(self, symbol, price):
+        risk_pct = self.config.get("risk_pct", 0.01)
+        contract_size = await self.api.get_contract_size(symbol)
+        capital = self.config.get("trading_capital", 1000)
+        return (capital * risk_pct) / (price * contract_size)
+        
     async def _wait_for_order_completion(self, order_id, timeout=30):
-        """Wait for order to reach final state"""
         start = time.time()
         while time.time() - start < timeout:
             order = self.active_orders.get(order_id)
@@ -91,7 +93,7 @@ class AsyncTradeExecutor:
                 return {
                     "status": self._state_to_string(order.state),
                     "filled_size": order.filled_quantity,
-                    "avg_price": order.price  # Simplified for example
+                    "avg_price": order.price
                 }
             await asyncio.sleep(0.1)
         return {"status": "timeout"}
@@ -105,7 +107,6 @@ class AsyncTradeExecutor:
         }.get(state, "unknown")
         
     async def _process_orders(self):
-        """Process orders from the queue"""
         while not self._stop_event.is_set():
             try:
                 order = await asyncio.wait_for(self.order_queue.get(), timeout=1.0)
@@ -120,16 +121,13 @@ class AsyncTradeExecutor:
             except asyncio.TimeoutError:
                 continue
             except Exception as e:
-                self.logger.error("Order processing error: %s", e, exc_info=True)
+                self.logger.error("Order processing error: %s", e)
                 
     async def _execute_order(self, order):
-        """Execute order through API"""
         try:
-            # Get Phemex price scale
             scale = await self.api.get_price_scale(order.symbol)
             price_ep = int(order.price * scale) if order.price else None
             
-            # Place order
             response = await self.api.place_order(
                 symbol=order.symbol,
                 side=order.side,
@@ -139,13 +137,14 @@ class AsyncTradeExecutor:
                 ioc_timeout=self.config.get("ioc_timeout_ms", 1000)
             )
             
-            # Handle response
+            if "id" in response:
+                order.exchange_order_id = response["id"]
+            
             if response["status"] == "filled":
                 order.update_fill(order.quantity, response["avg_price"])
                 return True
             elif response["status"] == "partial":
-                order.update_fill(response["filled_qty"], response["avg_price"])
-                # Submit remaining quantity as new order
+                order.update_fill(response["filled"], response["avg_price"])
                 remaining = order.quantity - order.filled_quantity
                 if remaining > 0:
                     new_order = Order(
@@ -163,28 +162,24 @@ class AsyncTradeExecutor:
                 return False
                 
         except Exception as e:
-            self.logger.error("Order execution failed: %s", e, exc_info=True)
+            self.logger.error("Order execution failed: %s", e)
             return False
             
     async def _monitor_orders(self):
-        """Monitor active orders for timeouts"""
         while not self._stop_event.is_set():
             await asyncio.sleep(5)
             current_time = time.time()
             
             for order_id, order in list(self.active_orders.items()):
-                # Handle pending orders timeout
                 if order.state == OrderState.PENDING and current_time - order.timestamp > 30:
                     self.logger.warning("Order timeout: %s", order_id)
                     order.state = OrderState.CANCELLED
                     await self._cancel_order(order)
                     
-                # Handle partial fills
                 if (order.state == OrderState.PARTIALLY_FILLED and 
                     current_time - order.last_update > 60):
                     self.logger.info("Refreshing partial order: %s", order_id)
                     await self._cancel_order(order)
-                    # Resubmit remaining quantity
                     remaining = order.quantity - order.filled_quantity
                     if remaining > 0:
                         new_order = Order(
@@ -198,17 +193,15 @@ class AsyncTradeExecutor:
                         await self.order_queue.put(new_order)
                         
     async def _cancel_order(self, order):
-        """Cancel order on exchange"""
-        try:
-            await self.api.cancel_order(order.symbol, order.order_id)
-            order.state = OrderState.CANCELLED
-        except Exception as e:
-            self.logger.warning("Cancel failed: %s", e)
-            
+        if order.exchange_order_id:
+            try:
+                await self.api.cancel_order(order.symbol, order.exchange_order_id)
+                order.state = OrderState.CANCELLED
+            except Exception as e:
+                self.logger.warning("Cancel failed: %s", e)
+                
     async def _handle_order_failure(self, order):
-        """Handle order failure with fallback"""
         if order.order_type != "market":
-            self.logger.info("Falling back to market order for %s", order.order_id)
             market_order = Order(
                 symbol=order.symbol,
                 side=order.side,
