@@ -138,7 +138,8 @@ class ApiHandler:
                         limit = min(limit, int(max_limit))
                 except Exception as e:
                     logger.error(f"Limit adjustment failed for {symbol}: {str(e)}")
-                    limit = min(limit, 500) if limit else None
+                    # Simplified safe fallback
+                    limit = min(limit, 500) if limit and isinstance(limit, int) else 500
 
         for attempt in range(retries):
             try:
@@ -185,11 +186,18 @@ class ApiHandler:
             elif isinstance(max_limit, str) and max_limit.isdigit():
                 return int(max_limit)
                 
-            # Check alternative locations
+            # Check alternative locations with type handling
             if 'info' in market:
                 info = market['info']
                 if 'maxOrderQty' in info:
-                    return int(info['maxOrderQty'])
+                    value = info['maxOrderQty']
+                    if isinstance(value, dict):
+                        logger.debug(f"Found dict maxOrderQty for {market['symbol']}")
+                        return 500
+                    elif isinstance(value, (int, float)):
+                        return int(value)
+                    elif isinstance(value, str) and value.isdigit():
+                        return int(value)
         except Exception as e:
             logger.debug(f"Limit extraction error: {str(e)}")
             
