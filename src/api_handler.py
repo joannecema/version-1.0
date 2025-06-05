@@ -16,6 +16,7 @@ class ApiHandler:
         self.price_scales: Dict[str, int] = {}
         self.last_market_load = 0
         self.semaphore = asyncio.Semaphore(5)  # Limit concurrent calls
+        self.market_load_lock = asyncio.Lock()  # Lock for market loading
        
     def _init_exchange(self, api_key, api_secret):
         params = {
@@ -32,21 +33,24 @@ class ApiHandler:
         return ccxt.phemex(params)
         
     async def load_markets(self, reload=False):
-        """Load markets with caching and automatic refresh"""
+        """Load markets with caching, automatic refresh, and concurrency lock"""
         current_time = time.time()
         if reload or not self.market_map or (current_time - self.last_market_load) > 3600:
-            try:
-                markets = await self.exchange.load_markets()
-                # Build symbol→market ID map (e.g. "BTC/USDT" → "BTCUSDT")
-                self.market_map = {symbol: market["id"] for symbol, market in markets.items()}
-                self.price_scales = {
-                    symbol: 10 ** market["precision"]["price"]
-                    for symbol, market in markets.items()
-                }
-                self.last_market_load = current_time
-                logger.info("Loaded %d markets", len(markets))
-            except Exception as e:
-                logger.error("Market load failed: %s", e)
+            async with self.market_load_lock:
+                # Double-check condition after acquiring lock
+                if reload or not self.market_map or (current_time - self.last_market_load) > 3600:
+                    try:
+                        markets = await self.exchange.load_markets()
+                        # Build symbol→market ID map (e.g. "BTC/USDT" → "BTCUSDT")
+                        self.market_map = {symbol: market["id"] for symbol, market in markets.items()}
+                        self.price_scales = {
+                            symbol: 10 ** market["precision"]["price"]
+                            for symbol, market in markets.items()
+                        }
+                        self.last_market_load = current_time
+                        logger.info("Loaded %d markets", len(markets))
+                    except Exception as e:
+                        logger.error("Market load failed: %s", e)
                 
     async def get_price_scale(self, symbol: str) -> int:
         """Get price scale factor for Phemex (10^precision)"""
@@ -83,26 +87,26 @@ class ApiHandler:
         retries: int = 3
     ) -> List[List[float]]:
         """Fetch OHLCV bars with retry logic and correct Phemex parameter handling."""
-        # Ensure markets are loaded so self.market_map is populated
+        # Ensure markets are loaded so exchange.markets exists
         if not self.market_map:
             await self.load_markets()
-
-        # Translate human-readable symbol (e.g. "BTC/USDT") to Phemex market ID (e.g. "BTCUSDT")
-        market_id = self.market_map.get(symbol, symbol)
+        
         params = params.copy() if params else {}
 
         # Always pass 'limit' via params, not as positional
         if limit is not None:
             params['limit'] = limit
 
-        # Inject 'to' parameter for Phemex API:
-        # - If 'since' is provided and 'limit' is provided, compute to = since + (limit * timeframe)
-        # - Otherwise, set to = now (ms)
+        # Inject 'to' parameter for Phemex API with future timestamp clamping
         if self.exchange.id == 'phemex':
             now_ms = int(time.time() * 1000)
             if since is not None and limit is not None:
                 timeframe_sec = self._timeframe_to_seconds(timeframe)
-                params['to'] = since + (limit * timeframe_sec * 1000)
+                to_time = since + (limit * timeframe_sec * 1000)
+                # Clamp to current time to prevent future timestamp errors
+                if to_time > now_ms:
+                    to_time = now_ms
+                params['to'] = to_time
             else:
                 params['to'] = now_ms
 
@@ -110,14 +114,14 @@ class ApiHandler:
             try:
                 async with self.semaphore:
                     return await self.exchange.fetch_ohlcv(
-                        market_id,
+                        symbol,
                         timeframe,
                         since=since,
                         limit=None,
                         params=params
                     )
             except BadRequest as e:
-                # BadRequest likely means missing/invalid parameters—stop retrying
+                # BadRequest likely means missing or invalid parameters—stop retrying
                 logger.error("BadRequest for %s: %s", symbol, e)
                 raise
             except (NetworkError, ExchangeError, RequestTimeout) as e:
@@ -214,4 +218,3 @@ class ApiHandler:
         except Exception as e:
             logger.error("Balance fetch failed: %s", e)
             return {}
-
