@@ -98,6 +98,7 @@ class ApiHandler:
                 logger.error("Symbol %s not found in market map", symbol)
                 return []
         
+        market_id = self.market_map[symbol]
         params = params.copy() if params else {}
 
         # Always pass 'limit' via params, not as positional
@@ -121,10 +122,10 @@ class ApiHandler:
             try:
                 async with self.semaphore:
                     return await self.exchange.fetch_ohlcv(
-                        symbol,
+                        market_id,
                         timeframe,
                         since=since,
-                        limit=limit,  # Pass limit directly to exchange
+                        limit=None,  # Pass limit via params only
                         params=params
                     )
             except BadRequest as e:
